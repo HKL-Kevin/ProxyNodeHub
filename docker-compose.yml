@@ -41,12 +41,19 @@ services:
       # 测速内核（镜像构建时已预装）
       - PROXYNODEHUB_KERNEL_PATH=/opt/subs-check/subs-check
 
+      # 订阅转换后端（minisubconvert / subconverter）。NodeParser 本地只做
+      # base64/明文拆行，纯 Clash YAML / sing-box JSON 节点行 / 新协议
+      # （hysteria2、anytls、socks…）都依赖这个后端归一成 URI 列表。
+      # 局域网内自建示例：http://192.168.2.6:3001/minisubconvert/sub
+      # 留空则非纯 URI 订阅会识别不出。也可启动后在 Web 界面「设置」里填。
+      - PROXYNODEHUB_SUBCONVERTER_URL=${PROXYNODEHUB_SUBCONVERTER_URL:-}
+
       # 容器时区，影响输出文件与界面里的时间戳
       - TZ=${TZ:-Asia/Shanghai}
 
     volumes:
-      # 命名卷：持久化搜索历史、特征库、测速快照与导出结果
-      - pnodes-data:/data
+      # 宿主目录映射：持久化搜索历史、特征库、测速快照、配置文件与导出结果（宿主机直接可见与编辑）
+      - ./data:/data
 
     # 搜索与测速都是网络密集任务，给足文件描述符
     ulimits:
@@ -56,6 +63,3 @@ services:
 
     # Web 界面常驻；崩溃后自动重启
     restart: unless-stopped
-
-volumes:
-  pnodes-data:

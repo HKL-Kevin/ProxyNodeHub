@@ -546,17 +546,29 @@ public sealed class SpeedTestRunner : IDisposable
 
     // ══════════════════ 历史快照 ══════════════════
 
-    /// <summary>把本轮结果另存为一份快照，超出保留回数的删最旧。</summary>
-    public void SaveRound(SpeedTestSnapshot snap)
+    /// <summary>把本轮结果另存为一份快照，超出保留回数的删最旧。
+    /// 必须使用内核原生生成的完整 YAML（含 uuid/password），绝不自行手写转换。</summary>
+    public void SaveRound(SpeedTestSnapshot snap, string? kernelYaml = null)
     {
         try
         {
+            var yaml = kernelYaml;
+            if (string.IsNullOrWhiteSpace(yaml))
+            {
+                var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+                if (File.Exists(diskPath))
+                {
+                    try { yaml = File.ReadAllText(diskPath); } catch { }
+                }
+            }
+            if (string.IsNullOrWhiteSpace(yaml)) return;
+
             Directory.CreateDirectory(SpeedTestConfig.HistoryDir);
             // 文件名必须带毫秒：两轮测速间隔可能不足一秒，只到秒会互相覆盖。
             // 再加一个短随机后缀，彻底消除同毫秒碰撞的可能。
             var name = $"round-{DateTime.Now:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.yaml";
             var path = Path.Combine(SpeedTestConfig.HistoryDir, name);
-            File.WriteAllText(path, ToClashYaml(snap));
+            File.WriteAllText(path, yaml);
             PruneSnapshots();
         }
         catch { }
@@ -593,7 +605,8 @@ public sealed class SpeedTestRunner : IDisposable
         catch { }
     }
 
-    /// <summary>最近 N 回快照合并去重，返回 Clash YAML 供注入。</summary>
+    /// <summary>最近 N 回快照合并去重，返回 Clash YAML 供注入。
+    /// 同时兼容旧的单行格式和新的多行格式（内核原生 all.yaml）。</summary>
     public string BuildHistoryMerged(int keepRounds)
     {
         try
@@ -604,19 +617,17 @@ public sealed class SpeedTestRunner : IDisposable
                 .ToList();
             if (files.Count == 0) return "";
 
-            // 快照里是 Clash YAML，直接取节点条目重组比解析 NodeParser 的 URI 列表更稳
             var merged = new StringBuilder();
             merged.Append("proxies:\n");
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var f in files)
             {
-                foreach (var line in File.ReadAllLines(f))
+                foreach (var (block, server, port) in SplitNodeBlocks(File.ReadAllLines(f)))
                 {
-                    var t = line.Trim();
-                    if (!t.StartsWith("- {name:") && !t.StartsWith("- name:")) continue;
-                    var key = DedupKeyFromYamlLine(t);
-                    if (key == null || !seen.Add(key)) continue;
-                    merged.Append(t).Append('\n');
+                    if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(port)) continue;
+                    var key = $"{server}:{port}";
+                    if (!seen.Add(key)) continue;
+                    merged.Append(block);
                 }
             }
             return merged.Length <= "proxies:\n".Length ? "" : merged.ToString();
@@ -624,15 +635,77 @@ public sealed class SpeedTestRunner : IDisposable
         catch { return ""; }
     }
 
-    private static string? DedupKeyFromYamlLine(string line)
+    /// <summary>
+    /// 把 Clash YAML 的 proxies 列表拆分成独立的节点块。
+    /// 兼容两种格式：
+    ///   单行：  - {name: "...", server: x, port: 443, ...}
+    ///   多行：  - name: "..."
+    ///             server: x
+    ///             port: 443
+    /// 返回 (块文本, server, port) 元组。
+    /// </summary>
+    private static List<(string block, string? server, string? port)> SplitNodeBlocks(string[] lines)
     {
-        // 从 Clash 节点行里抠 server:port，与 NodeParser 的去重键口径一致
-        var s = Extract(line, "server:");
-        var p = Extract(line, "port:");
-        if (string.IsNullOrEmpty(s) || string.IsNullOrEmpty(p)) return null;
-        return $"{s}:{p}";
+        var result = new List<(string, string?, string?)>();
+        var currentBlock = new List<string>();
+        string? curServer = null, curPort = null;
+        bool pastHeader = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (!pastHeader)
+            {
+                if (trimmed.StartsWith("proxies:")) pastHeader = true;
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+            // "- " 开头 = 新节点块的开始
+            if (trimmed.StartsWith("- "))
+            {
+                FlushBlock(currentBlock, curServer, curPort, result);
+                currentBlock.Clear();
+                curServer = null;
+                curPort = null;
+            }
+            else if (currentBlock.Count == 0)
+            {
+                continue; // 还没遇到第一个节点，跳过
+            }
+
+            currentBlock.Add(line);
+
+            // 提取 server / port 用于去重。
+            // 对单行格式用 IndexOf；对多行格式逐行匹配行首关键词。
+            if (currentBlock.Count == 1 && trimmed.Contains('{'))
+            {
+                // 单行格式 - {name: ..., server: ..., port: ...}
+                curServer ??= Extract(trimmed, "server:");
+                curPort ??= Extract(trimmed, "port:");
+            }
+            else
+            {
+                // 多行格式 - 逐行精确匹配
+                if (trimmed.StartsWith("server:") && !trimmed.StartsWith("servername:"))
+                    curServer = trimmed["server:".Length..].Trim().Trim('"', '\'');
+                else if (trimmed.StartsWith("port:"))
+                    curPort = trimmed["port:".Length..].Trim().Trim('"', '\'');
+            }
+        }
+        FlushBlock(currentBlock, curServer, curPort, result);
+        return result;
     }
 
+    private static void FlushBlock(List<string> blockLines, string? server, string? port,
+        List<(string, string?, string?)> result)
+    {
+        if (blockLines.Count == 0) return;
+        var block = string.Join("\n", blockLines) + "\n";
+        result.Add((block, server, port));
+    }
+
+    /// <summary>从单行 Clash YAML 里按 key 抠值（用于兼容旧的单行 round 文件）。</summary>
     private static string? Extract(string line, string key)
     {
         var i = line.IndexOf(key, StringComparison.OrdinalIgnoreCase);
@@ -646,28 +719,6 @@ public sealed class SpeedTestRunner : IDisposable
         return v.Length == 0 ? null : v;
     }
 
-    /// <summary>快照内容（本轮通过节点）序列化为 Clash proxies 列表。</summary>
-    public static string ToClashYaml(SpeedTestSnapshot snap)
-    {
-        // 节点名与 SNI 可能含 " 或 \，直接嵌进双引号会生成损坏的 YAML，
-        // 而这个文件又要被 BuildHistoryMerged 按行解析回来，必须转义。
-        static string YQ(string s) =>
-            s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-
-        var sb = new StringBuilder();
-        sb.Append("proxies:\n");
-        foreach (var n in snap.Nodes.Where(n => n.Passed))
-        {
-            // 用 DisplayName：截断 | 后缀 + 带城市，Name/BaseName 保持原值不动
-            sb.Append($"  - {{name: \"{YQ(n.DisplayName)}\", type: {n.Type}, server: {n.Server}, port: {n.Port}");
-            if (n.Tls) sb.Append(", tls: true");
-            if (n.Udp) sb.Append(", udp: true");
-            if (!string.IsNullOrEmpty(n.Network)) sb.Append($", network: {n.Network}");
-            if (!string.IsNullOrEmpty(n.Sni)) sb.Append($", servername: {YQ(n.Sni)}");
-            sb.Append("}\n");
-        }
-        return sb.ToString();
-    }
 
     // ══════════════════ 工具 ══════════════════
 

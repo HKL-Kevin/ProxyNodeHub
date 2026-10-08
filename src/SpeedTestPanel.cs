@@ -458,9 +458,12 @@ public sealed class SpeedTestPanel : UserControl
             return;
         }
 
+        // 趁内核还在运行，从 /sub/all.yaml 拿完整的节点 YAML（含 uuid/password 等凭据）。
+        var kernelYaml = await _runner.GetPassedSubscriptionAsync(CancellationToken.None);
+
         _nodes = snap.Nodes ?? new List<SpeedTestNode>();
         OnNodesChanged?.Invoke();
-        _runner.SaveRound(snap);
+        _runner.SaveRound(snap, kernelYaml);
 
         // 写回仓库统计：按 subTag（订阅链接末尾的 #备注）分组
         var rounds = SpeedResultAggregator.GroupByRepo(_nodes);

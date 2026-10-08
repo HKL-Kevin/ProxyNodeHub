@@ -2629,7 +2629,7 @@ public class MainForm : Form
             ShowToast("没有可导出的仓库, 请先搜索并分析");
             return;
         }
-        using var dlg = new ExportDialog(_filteredRepos, _github);
+        using var dlg = new ExportDialog(_filteredRepos, _github, _settings.SubConverterUrl);
         dlg.ShowDialog(this);
     }
 

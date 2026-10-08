@@ -4,6 +4,7 @@ obj/
 dist/
 
 # 用户数据
+data/
 *.suo
 *.user
 *.userosscache

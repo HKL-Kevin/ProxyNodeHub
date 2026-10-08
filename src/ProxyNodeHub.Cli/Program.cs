@@ -184,10 +184,19 @@ public static class Program
 
             var contents = new List<string>();
             int i = 0;
+            var converter = string.IsNullOrWhiteSpace(_opt.SubConverterUrl) ? null
+                : _opt.SubConverterUrl!.Trim();
+            if (converter == null)
+                Log("⚠  未配置 --sub-converter，非纯 URI 订阅（Clash YAML / sing-box JSON / "
+                    + "新协议）将识别不出。");
             foreach (var link in validLinks)
             {
                 ct.ThrowIfCancellationRequested();
-                var content = await github.GetUrlAsync(link.Url, ct);
+                // 非纯 URI 订阅过 subconverter 归一成 target=uri；端点已带查询串用 & 接续。
+                var fetchUrl = converter != null && link.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? $"{converter}{(converter.Contains('?') ? "&" : "?")}target=uri&url={Uri.EscapeDataString(link.Url)}"
+                    : link.Url;
+                var content = await github.GetUrlAsync(fetchUrl, ct);
                 if (!string.IsNullOrEmpty(content)) contents.Add(content);
                 if (_opt.Verbose) Log($"  [{++i}/{validLinks.Count}] {link.Name}");
             }
@@ -283,6 +292,10 @@ public static class Program
 
         var github = new GitHubService(_opt.Token);
         var contents = new List<string>();
+        var converter = string.IsNullOrWhiteSpace(_opt.SubConverterUrl) ? null
+            : _opt.SubConverterUrl!.Trim();
+        if (converter == null)
+            Log("⚠  未配置 --sub-converter，非纯 URI 订阅将识别不出。");
 
         foreach (var input in _opt.Inputs)
         {
@@ -297,7 +310,11 @@ public static class Program
             else if (input.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                      input.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                content = await github.GetUrlAsync(input, ct);
+                // 非纯 URI 订阅过 subconverter 归一；端点已带查询串用 & 接续。
+                var fetchUrl = converter != null
+                    ? $"{converter}{(converter.Contains('?') ? "&" : "?")}target=uri&url={Uri.EscapeDataString(input)}"
+                    : input;
+                content = await github.GetUrlAsync(fetchUrl, ct);
                 Log($"下载: {input}");
             }
             else
@@ -455,6 +472,14 @@ public static class Program
 
         // 导出通过节点（Clash YAML，内核直接给的就是这个格式）
         var yaml = await runner.GetPassedSubscriptionAsync(ct);
+        if (string.IsNullOrWhiteSpace(yaml))
+        {
+            var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+            if (File.Exists(diskPath))
+            {
+                try { yaml = File.ReadAllText(diskPath); } catch { }
+            }
+        }
         if (!string.IsNullOrEmpty(yaml))
         {
             var outPath = Path.Combine(_opt.OutputDir, "passed.yaml");
@@ -464,7 +489,7 @@ public static class Program
             if (_opt.Stdout) Console.WriteLine(yaml);
         }
 
-        runner.SaveRound(snap);
+        runner.SaveRound(snap, yaml);
         await runner.StopAsync();
         return 0;
     }

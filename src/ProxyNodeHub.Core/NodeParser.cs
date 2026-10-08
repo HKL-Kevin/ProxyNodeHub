@@ -6,13 +6,21 @@ using System.Text.Json;
 
 namespace ProxyNodeHub;
 
-/// <summary>节点 URI 解析 / 计数 / 去重合并</summary>
+/// <summary>
+/// 节点 URI 拆行 / 计数 / 去重合并。
+///
+/// 设计原则：本类只做「文本 → URI 行」的最薄一层，不做协议级解析。
+/// 协议白名单、sing-box JSON → URI 还原这类容易出 bug 的手写逻辑一律不在这里做 ——
+/// 格式归一由外部 subconverter（minisubconvert / sub-store）负责，它的协议覆盖面和
+/// 维护活跃度都远胜于我们自己维护一份 scheme 列表。
+///
+/// 因此 SplitNodeLines 的口径是：能解 base64 整块就解，解完（或本身就是明文）后，
+/// 凡是「这一行里有 ://」就当成一条节点 URI 收下。具体协议是否被后续测速内核支持，
+/// 由 NodeCatalog / SpeedTestRunner 那一层判断，不在这里丢。
+/// </summary>
 public static class NodeParser
 {
-    private static readonly string[] Protocols =
-        { "vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "tuic://" };
-
-    /// <summary>统计内容中的节点数 (支持 Base64 订阅 / Clash YAML)</summary>
+    /// <summary>统计内容中的节点数 (支持整块 Base64 订阅 / Clash YAML)</summary>
     public static int CountNodes(string? content)
     {
         if (string.IsNullOrEmpty(content)) return 0;
@@ -24,36 +32,43 @@ public static class NodeParser
         return 0;
     }
 
-    /// <summary>把文本拆成节点 URI 行列表 (自动处理整块 Base64)</summary>
+    /// <summary>
+    /// 把文本拆成节点 URI 行列表 (自动处理整块 Base64)。
+    /// 不做协议白名单过滤：只要行内含 "://" 即视为节点行。
+    /// 未识别格式（纯 Clash YAML 等）返回空，交给 CountNodes 的 YAML 分支或外部 subconverter。
+    /// </summary>
     public static List<string> SplitNodeLines(string content)
     {
         var result = new List<string>();
         var text = content.Trim();
 
-        if (!Protocols.Any(p => text.Contains(p)))
+        // 整块 Base64 订阅：内容里没有任何 "://"，尝试解一次 base64。
+        if (!text.Contains("://"))
         {
             var decoded = TryDecodeBase64(text);
-            if (decoded != null && Protocols.Any(p => decoded.Contains(p)))
+            if (decoded != null && decoded.Contains("://"))
                 text = decoded;
         }
 
         foreach (var rawLine in text.Split('\n'))
         {
             var line = rawLine.Trim();
-            if (line.Length > 10 && Protocols.Any(p => line.StartsWith(p)))
+            // 长度门槛挡空行 / 噪声；含 "://" 即节点 URI，不限 scheme。
+            if (line.Length > 10 && line.Contains("://"))
                 result.Add(line);
         }
         return result;
     }
 
-    /// <summary>提取去重键 (server:port)</summary>
+    /// <summary>提取去重键 (server:port)。无法解析返回 null。</summary>
     public static string? GetDedupKey(string uri)
     {
         try
         {
             uri = uri.Trim();
 
-            if (uri.StartsWith("vmess://"))
+            // vmess://base64(JSON)，JSON 里 add/port 字段才是真正的服务器端口。
+            if (uri.StartsWith("vmess://", StringComparison.OrdinalIgnoreCase))
             {
                 var json = TryDecodeBase64(uri[8..]);
                 if (json == null) return null;
@@ -65,26 +80,8 @@ public static class NodeParser
                 return null;
             }
 
-            if (uri.StartsWith("vless://") || uri.StartsWith("trojan://") ||
-                uri.StartsWith("hy2://") || uri.StartsWith("tuic://"))
-            {
-                var rest = uri[(uri.IndexOf("://") + 3)..];
-                if (rest.Contains('@')) rest = rest[(rest.LastIndexOf('@') + 1)..];
-                foreach (var sep in new[] { '?', '#', '/' })
-                    if (rest.Contains(sep)) rest = rest[..rest.IndexOf(sep)];
-                return rest.Contains(':') ? rest : null;
-            }
-
-            if (uri.StartsWith("ss://"))
-            {
-                var rest = uri[5..];
-                if (rest.Contains('@')) rest = rest[(rest.LastIndexOf('@') + 1)..];
-                foreach (var sep in new[] { '#', '/' })
-                    if (rest.Contains(sep)) rest = rest[..rest.IndexOf(sep)];
-                return rest.Contains(':') ? rest : null;
-            }
-
-            if (uri.StartsWith("ssr://"))
+            // ssr://base64(host:port:...)，解开后前两段就是 host:port。
+            if (uri.StartsWith("ssr://", StringComparison.OrdinalIgnoreCase))
             {
                 var decoded = TryDecodeBase64(uri[6..]);
                 if (decoded != null)
@@ -92,7 +89,17 @@ public static class NodeParser
                     var parts = decoded.Split(':');
                     if (parts.Length > 1) return $"{parts[0]}:{parts[1]}";
                 }
+                return null;
             }
+
+            // 其余所有 scheme（vless/trojan/ss/hy2/hysteria2/hysteria/tuic/anytls/socks/...）
+            // 统一按「:// 之后、@ 之后、第一个 ? # / 之前」取 host:port。
+            // 这覆盖了 subconverter target=uri 输出的所有常见形态，无需逐一列举 scheme。
+            var rest = uri[(uri.IndexOf("://", StringComparison.Ordinal) + 3)..];
+            if (rest.Contains('@')) rest = rest[(rest.LastIndexOf('@') + 1)..];
+            foreach (var sep in new[] { '?', '#', '/' })
+                if (rest.Contains(sep)) rest = rest[..rest.IndexOf(sep)];
+            return rest.Contains(':') ? rest : null;
         }
         catch { }
         return null;

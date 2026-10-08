@@ -79,18 +79,43 @@ public sealed class WebState
 
     public string? GetPassedYaml()
     {
-        // 优先用内存里通过节点重新生成的 YAML（带城市、已截断 | 后缀），
-        // 否则回落到测速完成时缓存的 web_passed.yaml。
-        // 这俩可能不同：内存的 _nodes 会随 ipinfo.io 查询更新城市，
-        // 而 web_passed.yaml 是 SaveNodes 那一刻写的，可能还是旧值。
+        // 优先返回内核原生生成的完整 YAML（含 uuid/password 等完整凭据）。
+        // 绝不自行手写转换 —— SpeedTestNode 不含凭据，任何二次转换都会丢失 uuid。
         lock (_gate)
         {
-            if (_nodes.Count > 0)
+            if (!string.IsNullOrWhiteSpace(_lastPassedYaml))
+                return _lastPassedYaml;
+
+            var kernelAllYaml = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+            if (File.Exists(kernelAllYaml))
             {
-                var snap = new SpeedTestSnapshot { Nodes = _nodes };
-                return SpeedTestRunner.ToClashYaml(snap);
+                try
+                {
+                    var yaml = File.ReadAllText(kernelAllYaml);
+                    if (!string.IsNullOrWhiteSpace(yaml))
+                    {
+                        _lastPassedYaml = yaml;
+                        return yaml;
+                    }
+                }
+                catch { }
             }
-            return _lastPassedYaml;
+
+            if (File.Exists(PassedYamlPath))
+            {
+                try
+                {
+                    var yaml = File.ReadAllText(PassedYamlPath);
+                    if (!string.IsNullOrWhiteSpace(yaml))
+                    {
+                        _lastPassedYaml = yaml;
+                        return yaml;
+                    }
+                }
+                catch { }
+            }
+
+            return null;
         }
     }
 
@@ -146,7 +171,14 @@ public sealed class WebState
 
         try
         {
-            if (File.Exists(PassedYamlPath))
+            var kernelAllYaml = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+            if (File.Exists(kernelAllYaml))
+            {
+                var yaml = File.ReadAllText(kernelAllYaml);
+                if (!string.IsNullOrWhiteSpace(yaml))
+                    lock (_gate) _lastPassedYaml = yaml;
+            }
+            else if (File.Exists(PassedYamlPath))
             {
                 var yaml = File.ReadAllText(PassedYamlPath);
                 if (!string.IsNullOrWhiteSpace(yaml))
@@ -184,16 +216,25 @@ public sealed class WebState
         catch { }
     }
 
-    private void SaveNodes(SpeedTestSnapshot snap)
+    private void SaveNodes(SpeedTestSnapshot snap, string? kernelYaml)
     {
         try
         {
             snap.CheckedAt = DateTime.Now;
             AtomicFile.Write(NodesPath, JsonSerializer.Serialize(snap, WebJsonContext.Default.WebSpeedTestSnapshot));
 
-            // 同时把通过节点序列化成 Clash YAML 缓存起来，供导出端点用。
-            // SpeedTestRunner 在 finally 里被 Dispose，事后没法再拉 /sub/all.yaml。
-            var yaml = SpeedTestRunner.ToClashYaml(snap);
+            // 使用内核原生生成的完整 YAML（含 uuid/password 等凭据），供导出端点用。
+            // 绝不自行手写转换 —— SpeedTestNode 不含凭据字段，转换必丢 uuid。
+            var yaml = kernelYaml;
+            if (string.IsNullOrWhiteSpace(yaml))
+            {
+                var kernelAllYaml = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+                if (File.Exists(kernelAllYaml))
+                {
+                    try { yaml = File.ReadAllText(kernelAllYaml); } catch { }
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(yaml))
             {
                 lock (_gate) _lastPassedYaml = yaml;
@@ -396,6 +437,9 @@ public sealed class WebState
                 await EnsureProxyAsync(github, ct);
 
                 Log($"加载节点清单 · {sources.Count} 个订阅来源…");
+                if (string.IsNullOrWhiteSpace(settings.SubConverterUrl))
+                    Log("⚠  未配置 SubConverterUrl，纯 Clash YAML / sing-box JSON 节点行 / "
+                        + "新协议（hysteria2/anytls/socks 等）将识别不出。请在设置里填写 minisubconvert 端点。");
                 var nodes = await NodeCatalog.LoadAsync(github, sources, (i, n) =>
                 {
                     lock (_gate) { CatalogDone = i; CatalogTotal = n; }
@@ -648,6 +692,17 @@ public sealed class WebState
         var snap = await runner.GetResultsAsync(CancellationToken.None);
         if (snap?.Nodes.Count > 0)
         {
+            // 趁内核还在运行，从 /sub/all.yaml 拿完整的节点 YAML（含 uuid/password 等凭据）。
+            var kernelYaml = await runner.GetPassedSubscriptionAsync(CancellationToken.None);
+            if (string.IsNullOrWhiteSpace(kernelYaml))
+            {
+                var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+                if (File.Exists(diskPath))
+                {
+                    try { kernelYaml = File.ReadAllText(diskPath); } catch { }
+                }
+            }
+
             // 内核可能没填 IP（media-check 关了）；只对「通过测速」的节点查 IP 详情
             // —— 未通过的节点不会进导出，查了也是浪费 ipinfo.io 额度
             var token = Settings.IpInfoToken;
@@ -681,8 +736,8 @@ public sealed class WebState
 
             lock (_gate) _nodes = snap.Nodes;
             var changed = SpeedResultAggregator.ApplyRound(snap);
-            runner.SaveRound(snap);
-            SaveNodes(snap);
+            runner.SaveRound(snap, kernelYaml);
+            SaveNodes(snap, kernelYaml);
             Log($"测速完成: {snap.Nodes.Count} 个节点，{snap.Nodes.Count(n => n.Passed)} 个通过" +
                 (changed > 0 ? $" · 已更新 {changed} 个仓库的可用分" : ""), "success");
         }
@@ -792,7 +847,8 @@ public sealed class WebState
         Log($"合并 {links.Count} 条链接…");
 
         var result = await SearchPipeline.MergeAsync(github, links,
-            (i, n) => { if (i % 10 == 0 || i == n) Log($"  合并进度 {i}/{n}"); }, ct);
+            (i, n) => { if (i % 10 == 0 || i == n) Log($"  合并进度 {i}/{n}"); }, ct,
+            subConverterUrl: settings.SubConverterUrl);
 
         Log($"去重: 原始 {result.total} 节点 → 唯一 {result.unique} 个", "success");
         return (result.b64, result.plain, result.total, result.unique);

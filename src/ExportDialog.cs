@@ -13,12 +13,15 @@ public class ExportDialog : Form
     private readonly string _originalText;
     private readonly GitHubService _github;
     private readonly List<RepoInfo> _repos;
+    /// <summary>订阅转换后端端点；非空时合并走它归一成 URI 列表。</summary>
+    private readonly string? _subConverterUrl;
     private ModernButton _btnMerge = null!, _btnBack = null!, _btnCopy = null!, _btnExport = null!;
 
-    public ExportDialog(List<RepoInfo> repos, GitHubService github)
+    public ExportDialog(List<RepoInfo> repos, GitHubService github, string? subConverterUrl = null)
     {
         _repos = repos;
         _github = github;
+        _subConverterUrl = string.IsNullOrWhiteSpace(subConverterUrl) ? null : subConverterUrl!.Trim();
 
         Text = "订阅链接";
         Size = new Size(720, 560);
@@ -174,7 +177,12 @@ public class ExportDialog : Form
             for (int i = 0; i < validLinks.Count; i++)
             {
                 _btnMerge.Text = $"合并中 {i + 1}/{validLinks.Count}…";
-                var content = await _github.GetUrlAsync(validLinks[i].Url);
+                // 非纯 URI 订阅过 subconverter 归一；端点已带查询串用 & 接续。
+                var link = validLinks[i];
+                var fetchUrl = _subConverterUrl != null && link.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? $"{_subConverterUrl}{(_subConverterUrl.Contains('?') ? "&" : "?")}target=uri&url={Uri.EscapeDataString(link.Url)}"
+                    : link.Url;
+                var content = await _github.GetUrlAsync(fetchUrl);
                 if (!string.IsNullOrEmpty(content)) contents.Add(content);
             }
 

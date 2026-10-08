@@ -206,18 +206,30 @@ public static class SearchPipeline
 
     /// <summary>
     /// 桌面版「合并订阅」的等价实现：抓取所有有效链接内容 → 去重合并。
+    /// subConverterUrl 非空时，每条订阅 URL 改写成
+    ///   {subConverterUrl}?target=uri&amp;url={原URL 编码}
+    /// 让转换后端把 Clash YAML / sing-box JSON / 新协议统一成 URI 列表 ——
+    /// NodeParser 本地只做 base64/明文拆行，解不了这些格式。
     /// </summary>
     public static async Task<(string plain, string b64, int total, int unique)> MergeAsync(
         GitHubService github, IEnumerable<SubscriptionLink> links,
-        Action<int, int>? onProgress = null, CancellationToken ct = default)
+        Action<int, int>? onProgress = null, CancellationToken ct = default,
+        string? subConverterUrl = null)
     {
         var list = links.Where(l => l.IsValid).ToList();
         var contents = new List<string>();
+        var converter = string.IsNullOrWhiteSpace(subConverterUrl) ? null
+            : subConverterUrl!.Trim();
         for (int i = 0; i < list.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
             onProgress?.Invoke(i + 1, list.Count);
-            var content = await github.GetUrlAsync(list[i].Url, ct);
+            var url = list[i].Url;
+            // 非纯 URI 订阅过 subconverter 归一；端点已带查询串用 & 接续。
+            var fetchUrl = converter != null && url.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? $"{converter}{(converter.Contains('?') ? "&" : "?")}target=uri&url={Uri.EscapeDataString(url)}"
+                : url;
+            var content = await github.GetUrlAsync(fetchUrl, ct);
             if (!string.IsNullOrEmpty(content)) contents.Add(content);
         }
         return NodeParser.MergeNodes(contents);

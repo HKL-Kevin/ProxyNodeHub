@@ -14,7 +14,7 @@ namespace ProxyNodeHub;
 /// 几千个节点要跑几小时。用户想先看到「有哪些节点」再决定测哪些 ——
 /// 那一步只需要 HTTP 拉取 + 文本解析，秒级完成，用不着内核。
 ///
-/// 解析口径与 NodeParser 一致（vmess/vless/trojan/ss/ssr/hy2/tuic），
+/// 解析口径与 NodeParser 一致（任意含 "://" 的 URI 行；vmess/ssr 走 base64 内层），
 /// 这样列表里看到的节点与后续测速的是同一批。
 /// </summary>
 public static class NodeCatalog
@@ -40,8 +40,9 @@ public static class NodeCatalog
     ///   {subConverterUrl}?target=uri&url={原URL 编码}
     /// （地址若已含查询串则用 & 接续）
     /// 让转换后端把 Clash YAML / base64 / sing-box 等格式统一转成 URI 列表。
-    /// 否则只拉原始内容，靠 NodeParser.SplitNodeLines 自己解析 ——
-    /// 后者不认 Clash YAML 的 proxies: 段，纯 YAML 订阅会得 0 节点。
+    /// 否则只拉原始内容，靠 NodeParser.SplitNodeLines 做 base64/明文兜底 ——
+    /// 后者不认 Clash YAML 的 proxies: 段，纯 YAML 订阅会得 0 节点；
+    /// 协议级归一（hysteria2/anytls/socks/JSON 行等）也依赖 subconverter。
     ///
     /// subConverterUrl 应填到「完整端点路径」为止，例如
     ///   http://host:3001/minisubconvert/sub

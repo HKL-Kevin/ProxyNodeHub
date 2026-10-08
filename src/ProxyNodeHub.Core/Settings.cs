@@ -60,13 +60,19 @@ public class AppSettings
     public string KernelPath { get; set; } = "";
 
     /// <summary>
-    /// 订阅转换后端地址（MiniSubConvert / subconverter）。
-    /// 留空 = 不走转换，直接拉原始订阅。原始订阅若是 Clash YAML
-    /// （proxies: 段）则解析不出节点 —— NodeParser 只认 URI 列表。
-    /// 填写后，清单加载会把每个订阅 URL 改写成
-    ///   {SubConverterUrl}/sub?target=uri&amp;url={原URL 编码}
-    /// 拿到的就是纯 URI 列表，所有格式统一被解析。
-    /// 地址含 secret 路径，如 http://127.0.0.1:3000/minisubconvert
+    /// 订阅转换后端地址（MiniSubConvert / subconverter）。**强烈建议填写**。
+    ///
+    /// NodeParser 本地只做「文本 → URI 行」的薄拆行，不做协议级解析 ——
+    /// hysteria2/anytls/socks 等 scheme 的参数解析、sing-box JSON 节点行、
+    /// Clash YAML 的 proxies 段，全交给转换后端归一成 target=uri 的纯 URI 列表。
+    /// 不填则只能识别本身就是 URI 列表的明文/base64 订阅，纯 YAML / JSON 节点
+    /// 行 / 新协议会得 0 节点。
+    ///
+    /// 填写后清单加载会把每个订阅 URL 改写成
+    ///   {SubConverterUrl}?target=uri&amp;url={原URL 编码}
+    /// （端点若已带查询串用 & 接续）。地址填到「完整端点路径」为止，例如
+    ///   http://192.168.2.6:3001/minisubconvert/sub
+    /// 含 secret 路径的部署把 secret 一并填全。
     /// </summary>
     public string SubConverterUrl { get; set; } = "";
 

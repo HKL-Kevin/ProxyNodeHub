@@ -17,6 +17,13 @@ public sealed class Options
     public string? Token;
     public string? Proxy;
     public bool AutoProxy;
+    /// <summary>
+    /// 订阅转换后端端点（minisubconvert / subconverter）。CLI 的 merge/search
+    /// 抓到的订阅若非纯 URI 列表（Clash YAML、sing-box JSON 等），NodeParser
+    /// 本地解不了，必须过这个后端归一成 target=uri。
+    /// 也支持 PROXYNODEHUB_SUBCONVERTER_URL 环境变量。
+    /// </summary>
+    public string? SubConverterUrl;
     public int Count = 30;
     public int SinceDays = 7;
     public int Concurrency = 6;
@@ -112,6 +119,9 @@ public sealed class Options
                 case "-p" or "--proxy":
                     o.Proxy = Next(a);
                     break;
+                case "--sub-converter" or "--subconverter":
+                    o.SubConverterUrl = Next(a);
+                    break;
                 case "-n" or "--count":
                     o.Count = ParseInt(a, Next(a), 1, 500);
                     break;
@@ -146,6 +156,7 @@ public sealed class Options
 
         // 环境变量兜底（容器里最方便的传参方式）
         o.Token ??= Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+        o.SubConverterUrl ??= Environment.GetEnvironmentVariable("PROXYNODEHUB_SUBCONVERTER_URL");
 
         return o;
     }
@@ -178,6 +189,8 @@ ProxyNodeHub CLI — GitHub 免费节点仓库搜索、聚合与测速
 通用选项:
   -t, --token <TOKEN>        GitHub Token（或设 GITHUB_TOKEN 环境变量）
   -p, --proxy <名称>         加速镜像，如 ghfast.top、gh-proxy.com
+      --sub-converter <URL>  订阅转换后端，如 http://host:3001/minisubconvert/sub
+                             （或设 PROXYNODEHUB_SUBCONVERTER_URL；非纯 URI 订阅必填）
       --auto-proxy           自动测速并选择最快镜像
   -o, --output <目录>        输出目录（默认 /data/output）
       --stdout               结果同时打印到标准输出

@@ -46,13 +46,12 @@ RUN dotnet publish src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj \
         -o /app
 
 # ───────────────────────── 运行阶段 ─────────────────────────
-# 用 aspnet 运行时而非基础 runtime：web 命令需要 ASP.NET Core 的
-# 最小 API 与静态文件服务。批处理命令（search/merge/speedtest）也用它，
-# 多出的体积换掉了一个镜像两种用途的复杂度。
+# 使用 Debian 官方 aspnet:8.0 运行时（原生完整 glibc 环境）。
+# 原因：subs-check 内核内置的 sub-store 依赖动态拉取的预编译 Node.js，
+# 该二进制强依赖 glibc (/lib/ld-linux-aarch64.so.1)。
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 
-# 测速内核是 Go 二进制，静态链接，不需要额外的 libc 包；
-# curl 用于容器健康检查与调试。
+# curl 用于容器健康检查与调试
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -60,43 +59,7 @@ RUN apt-get update \
 ARG TARGETARCH
 ARG SUBS_CHECK_VERSION=v1.6.5
 
-# 下载并解压对应架构的 subs-check 内核。
-# 资产命名：subs-check_Linux_x86_64.tar.gz / subs-check_Linux_aarch64.tar.gz
-# 走 gh-proxy.com 镜像 —— 直连 GitHub 在受限网络下会失败；
-# 镜像不可用时回退直连，保证构建在能直连的环境也能成功。
-RUN set -eux; \
-    case "$TARGETARCH" in \
-        amd64) KERNEL_ASSET="subs-check_Linux_x86_64.tar.gz" ;; \
-        arm64) KERNEL_ASSET="subs-check_Linux_aarch64.tar.gz" ;; \
-        *) echo "不支持的架构: $TARGETARCH (仅支持 amd64 / arm64)"; exit 1 ;; \
-    esac; \
-    mkdir -p /opt/subs-check; \
-    URL="https://github.com/beck-8/subs-check/releases/download/${SUBS_CHECK_VERSION}/${KERNEL_ASSET}"; \
-    (curl -fsSL --retry 3 --retry-delay 2 -o /tmp/kernel.tar.gz "https://gh-proxy.com/${URL}" \
-     || curl -fsSL --retry 3 --retry-delay 2 -o /tmp/kernel.tar.gz "$URL"); \
-    tar -xzf /tmp/kernel.tar.gz -C /opt/subs-check; \
-    rm -f /tmp/kernel.tar.gz; \
-    chmod +x /opt/subs-check/subs-check; \
-    /opt/subs-check/subs-check --version 2>&1 | head -1 || true; \
-    echo "${SUBS_CHECK_VERSION}" > /opt/subs-check/kernel.version
-
-# 目录布局（关键）：
-# 内核把 config/output 等解析为「自身二进制所在目录」下的相对路径。
-# 所以 RootDir 必须 == 内核目录，否则内核会去写一个不存在的目录，
-# 结果就是 /sub/all.yaml 永远为空。
-#
-# 做法：RootDir 设为 /opt/subs-check，再把三个需要跨容器持久化的子目录
-# 软链到数据卷 /data/subcheck 下 —— 内核二进制本身留在镜像里（不必持久化），
-# 而配置、历史快照、导出结果都落在卷上。
-RUN set -eux; \
-    mkdir -p /data/subcheck/config /data/subcheck/history /data/subcheck/output; \
-    for d in config history output; do \
-        rm -rf "/opt/subs-check/$d"; \
-        ln -s "/data/subcheck/$d" "/opt/subs-check/$d"; \
-    done; \
-    chown -R app:app /data/subcheck /opt/subs-check
-# 非 root 运行。基础镜像可能已占用 10001，先探测再创建，
-# 保证 UID 与镜像内既有用户不冲突。
+# 将用户创建、内核解压、软链建立与权限分配整合到单层 RUN，彻底消除写时复制冗余。
 RUN set -eux; \
     if ! id -u app > /dev/null 2>&1; then \
         if getent passwd 10001 > /dev/null 2>&1; then \
@@ -105,11 +68,28 @@ RUN set -eux; \
             useradd -m -u 10001 -s /usr/sbin/nologin app; \
         fi; \
     fi; \
-    mkdir -p /data/output; \
+    case "$TARGETARCH" in \
+        amd64) KERNEL_ASSET="subs-check_Linux_x86_64.tar.gz" ;; \
+        arm64) KERNEL_ASSET="subs-check_Linux_aarch64.tar.gz" ;; \
+        *) echo "不支持的架构: $TARGETARCH (仅支持 amd64 / arm64)"; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/subs-check /data/output /data/subcheck/config /data/subcheck/history /data/subcheck/output; \
+    URL="https://github.com/beck-8/subs-check/releases/download/${SUBS_CHECK_VERSION}/${KERNEL_ASSET}"; \
+    (curl -fsSL --retry 3 --retry-delay 2 -o /tmp/kernel.tar.gz "https://gh-proxy.com/${URL}" \
+     || curl -fsSL --retry 3 --retry-delay 2 -o /tmp/kernel.tar.gz "$URL"); \
+    tar -xzf /tmp/kernel.tar.gz -C /opt/subs-check; \
+    rm -f /tmp/kernel.tar.gz; \
+    chmod +x /opt/subs-check/subs-check; \
+    /opt/subs-check/subs-check --version 2>&1 | head -1 || true; \
+    echo "${SUBS_CHECK_VERSION}" > /opt/subs-check/kernel.version; \
+    for d in config history output; do \
+        rm -rf "/opt/subs-check/$d"; \
+        ln -s "/data/subcheck/$d" "/opt/subs-check/$d"; \
+    done; \
     chown -R app:app /data /opt/subs-check
 
 WORKDIR /app
-COPY --from=build /app/ ./
+COPY --from=build --chown=app:app /app/ ./
 
 ENV PROXYNODEHUB_DATA_DIR=/data \
     PROXYNODEHUB_CONFIG_DIR=/data \
