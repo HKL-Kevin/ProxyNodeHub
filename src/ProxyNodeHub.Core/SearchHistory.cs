@@ -27,8 +27,7 @@ public class RepoEntry
 public static class SearchHistory
 {
     private static readonly string FilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ProxyNodeHub", "searched_repos.json");
+        AppEnvironment.UserDataDir, "searched_repos.json");
 
     private static SearchRecord _record = null!;
     private static readonly object _lock = new();

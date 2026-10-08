@@ -65,8 +65,7 @@ public class FeaturePack
 public static class CustomFeatureLibrary
 {
     private static readonly string Path = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ProxyNodeHub", "custom_features.json");
+        AppEnvironment.UserDataDir, "custom_features.json");
 
     private static FeaturePack? _pack;
     private static bool _loaded = false;

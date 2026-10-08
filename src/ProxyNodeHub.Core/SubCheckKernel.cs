@@ -21,8 +21,13 @@ public static class SubCheckKernel
 {
     public const string Owner = "beck-8";
     public const string Repo = "subs-check";
-    public const string AssetName = "subs-check_Windows_x86_64.zip";
     public const string SourceUrl = "https://github.com/beck-8/subs-check";
+
+    /// <summary>当前平台的 release 资产名（Windows zip / Linux·macOS tar.gz）。</summary>
+    public static string AssetName => AppEnvironment.KernelAssetName;
+
+    /// <summary>内核可执行文件名（Windows 带 .exe，类 Unix 不带）。</summary>
+    public static string ExecutableName => AppEnvironment.KernelExecutableName;
 
     private static readonly HttpClient Http = new()
     {
@@ -213,23 +218,11 @@ public static class SubCheckKernel
                 File.Move(SpeedTestConfig.KernelPath, bakExe);
             }
 
-            using (var zip = ZipFile.OpenRead(tmpZip))
-            {
-                var entry = zip.Entries.FirstOrDefault(e =>
-                    e.Name.Equals("subs-check.exe", StringComparison.OrdinalIgnoreCase));
-                if (entry == null)
-                    throw new InvalidDataException("压缩包内未找到 subs-check.exe");
-
-                // 解压先写 .new 临时文件，绝不直接写 KernelPath：
-                // 中途取消/磁盘满只会留下残缺的 .new，KernelPath 要么还是旧内核、
-                // 要么已被移到 .bak，永远不会是半个文件。
-                await using var src = entry.Open();
-                await using var dst = File.Create(newExe);
-                await src.CopyToAsync(dst, ct);
-            }
+            await ExtractKernelAsync(tmpZip, newExe, ct);
 
             // 解压完整成功，原子替换
             File.Move(newExe, SpeedTestConfig.KernelPath, true);
+            EnsureExecutable(SpeedTestConfig.KernelPath);
 
             LocalVersionCache = rel.Version;
             onProgress(new InstallProgress { Phase = "解压", Percent = 100 });
@@ -291,9 +284,9 @@ public static class SubCheckKernel
             using (var zip = ZipFile.OpenRead(tmpZip))
             {
                 var entry = zip.Entries.FirstOrDefault(e =>
-                    e.Name.Equals("subs-check.exe", StringComparison.OrdinalIgnoreCase));
+                    e.Name.Equals(ExecutableName, StringComparison.OrdinalIgnoreCase));
                 if (entry == null)
-                    throw new InvalidDataException("压缩包内未找到 subs-check.exe");
+                    throw new InvalidDataException($"压缩包内未找到 {ExecutableName}");
 
                 await using var src = entry.Open();
                 await using var dst = File.Create(newExe);
@@ -301,6 +294,7 @@ public static class SubCheckKernel
             }
 
             File.Move(newExe, SpeedTestConfig.KernelPath, true);
+            EnsureExecutable(SpeedTestConfig.KernelPath);
 
             LocalVersionCache = rel.Version;
             onProgress(new InstallProgress { Phase = "解压", Percent = 100 });
@@ -378,8 +372,88 @@ public static class SubCheckKernel
         }
     }
 
-    private static async Task<string?> FetchExpectedHashAsync(string checksumsUrl, CancellationToken ct)
+    /// <summary>
+    /// 从压缩包中取出内核可执行文件写入 dest。
+    /// Windows 资产是 zip，Linux/macOS 资产是 tar.gz —— 两种都要支持，
+    /// 否则容器里无法安装或更新内核。
+    ///
+    /// 格式判断按内容魔数而非文件名：下载落地的临时文件是
+    /// "subs-check.download"，没有 .tar.gz 后缀，靠后缀判断会误走 zip 分支。
+    /// </summary>
+    private static async Task ExtractKernelAsync(string archivePath, string dest, CancellationToken ct)
     {
+        if (LooksLikeTarGz(archivePath))
+        {
+            await ExtractFromTarGzAsync(archivePath, dest, ct);
+            return;
+        }
+
+        // zip（Windows 资产）
+        using var zip = ZipFile.OpenRead(archivePath);
+        var entry = zip.Entries.FirstOrDefault(e =>
+            e.Name.Equals(ExecutableName, StringComparison.OrdinalIgnoreCase));
+        if (entry == null)
+            throw new InvalidDataException($"压缩包内未找到 {ExecutableName}");
+
+        // 解压先写临时文件，绝不直接写目标：
+        // 中途取消/磁盘满只会留下残缺文件，旧内核不受影响。
+        await using var src = entry.Open();
+        await using var dst = File.Create(dest);
+        await src.CopyToAsync(dst, ct);
+    }
+
+    /// <summary>gzip 魔数 (1F 8B) 探测，避免拿错格式硬解。</summary>
+    private static bool LooksLikeTarGz(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            var b = new byte[2];
+            if (fs.Read(b, 0, 2) != 2) return false;
+            return b[0] == 0x1F && b[1] == 0x8B;
+        }
+        catch { return false; }
+    }
+
+    private static async Task ExtractFromTarGzAsync(string archivePath, string dest, CancellationToken ct)
+    {
+        await using var fs = File.OpenRead(archivePath);
+        await using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
+
+        // .NET 8 的 TarReader 足够读这种单文件归档，无需额外依赖
+        using var reader = new System.Formats.Tar.TarReader(gz);
+        System.Formats.Tar.TarEntry? entry;
+        while ((entry = await reader.GetNextEntryAsync(cancellationToken: ct)) != null)
+        {
+            if (entry.EntryType is not (System.Formats.Tar.TarEntryType.RegularFile
+                or System.Formats.Tar.TarEntryType.V7RegularFile)) continue;
+
+            var name = Path.GetFileName(entry.Name);
+            if (!name.Equals(ExecutableName, StringComparison.OrdinalIgnoreCase)) continue;
+
+            await using var dst = File.Create(dest);
+            await entry.DataStream!.CopyToAsync(dst, ct);
+            return;
+        }
+        throw new InvalidDataException($"tar.gz 内未找到 {ExecutableName}");
+    }
+
+    /// <summary>类 Unix 平台给内核补上可执行权限（zip 解压不会带权限位）。</summary>
+    private static void EnsureExecutable(string path)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            var mode = File.GetUnixFileMode(path);
+            File.SetUnixFileMode(path, mode
+                | UnixFileMode.UserExecute
+                | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherExecute);
+        }
+        catch { }
+    }
+
+    private static async Task<string?> FetchExpectedHashAsync(string checksumsUrl, CancellationToken ct)    {
         try
         {
             var txt = await Http.GetStringAsync(checksumsUrl, ct);

@@ -69,11 +69,74 @@ public class SpeedTestNode
     public string? SubTag { get; set; }
     public List<NodeDetail> Details { get; set; } = new();
 
+    // ── ProxyNodeHub 自己补全的 IP 详细信息（内核不填）──
+    public string? IpInfoCity { get; set; }
+    public string? IpInfoRegion { get; set; }
+    public string? IpInfoOrg { get; set; }
+    public string? IpInfoAsn { get; set; }
+    /// <summary>经纬度，格式 "lat,lng"，来自 ipinfo.io。用于在世界地图上标注城市气泡。</summary>
+    public string? IpInfoLoc { get; set; }
+
     public bool Passed => Speed > 0;
 
     public string TlsUdpLabel =>
         (Tls ? "tls" : Network is "ws" or "h2" or "grpc" ? Network : "tcp")
         + (Udp ? "+udp" : "");
+
+    /// <summary>
+    /// 启发式判断 IP 是否为家宽（住宅 IP）。
+    ///
+    /// ipinfo.io 免费版不返回 usage 类型字段，只能按 ISP 组织名关键词猜：
+    /// 先排除机房关键词（amazon/google/cloudflare/ovh/hetzner/hosting/cloud/…），
+    /// 再匹配家宽关键词（comcast/verizon/telekom/vodafone/china telecom/…）。
+    /// 两者都不命中的视为「未知」——返回 false，宁可漏判不错判。
+    /// </summary>
+    public bool IsResidential
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(IpInfoOrg)) return false;
+            var org = IpInfoOrg!.ToLowerInvariant();
+
+            var dc = new[] { "amazon", "google", "microsoft", "cloudflare",
+                "digitalocean", "vultr", "linode", "ovh", "hetzner",
+                "data center", "hosting", "cloud", "server",
+                "data communication", "akamai", "fastly", "alibaba",
+                "tencent", "huawei", "oracle", "ibm", " Choopa " };
+            if (dc.Any(k => org.Contains(k))) return false;
+
+            var res = new[] { "comcast", "verizon", "at&t", "charter", "cox",
+                "spectrum", "centurylink", "telekom", "orange", "vodafone",
+                "telefonica", "bt ", "sky ", "rogers", "bell ", "telstra",
+                "china telecom", "china unicom", "china mobile",
+                "kddi", "ntt", "jcom", "sk broadband", " virgin ",
+                "liberty global", "tele2", "telia", "mtn", "etisalat",
+                "propelling", "hughes", "viasat", "starlink", "spacex" };
+            return res.Any(k => org.Contains(k));
+        }
+    }
+
+    /// <summary>
+    /// 统一的展示用节点名：截断内核拼接的 | 后缀 + 插入 ipinfo.io 查到的城市。
+    ///
+    /// 内核 rename-node 只拼国家码（🇺🇸US_1），不拼城市。城市来自 ipinfo.io
+    /// 的 IpInfoCity 字段，插在国家码与序号之间：🇺🇸US_1 → 🇺🇸US-Kansas City_1。
+    /// Name/BaseName 保持内核原值不动，DisplayName 只读不写。
+    /// </summary>
+    public string DisplayName
+    {
+        get
+        {
+            var raw = !string.IsNullOrWhiteSpace(Name) ? Name
+                    : !string.IsNullOrWhiteSpace(BaseName) ? BaseName
+                    : Server;
+            var pipe = raw.IndexOf('|');
+            var core = pipe > 0 ? raw[..pipe] : raw;
+            if (string.IsNullOrWhiteSpace(IpInfoCity)) return core;
+            var us = core.IndexOf('_');
+            return us <= 0 ? core : core[..us] + "-" + IpInfoCity + core[us..];
+        }
+    }
 }
 
 public class SpeedTestSnapshot
@@ -206,11 +269,19 @@ public sealed class SpeedTestRunner : IDisposable
     /// <summary>
     /// 生成 session.yaml = 用户的 config.yaml 原样 + 必须托管的 4 个键。
     /// 其余键完全继承，包括我们不知道的内核新键。
+    ///
+    /// nodeUris 非空时，只测这些节点：把它们作为本地订阅注入，
+    /// 而不是把上游订阅交给内核 —— 后者会让内核测到全部节点，
+    /// 几千个节点每个下载 20MB，耗时不可接受。
     /// </summary>
-    public string BuildSessionYaml(List<string> subUrls, bool withHistory, int keepRounds)
+    public string BuildSessionYaml(List<string> subUrls, bool withHistory, int keepRounds,
+        List<string>? nodeUris = null)
     {
         var yaml = SpeedTestConfig.ReadConfig();
         if (string.IsNullOrWhiteSpace(yaml)) yaml = "concurrent: 20\n";
+
+        // 设置页暴露的快捷参数注入。未设过的键不动 config.yaml 原值。
+        yaml = SpeedTestConfig.ApplySettingsOverrides(yaml, AppSettings.Load());
 
         // listen-port 必须绑回环，不能用内核默认的 0.0.0.0——那会把带节点
         // 凭据的订阅暴露到局域网。
@@ -218,16 +289,36 @@ public sealed class SpeedTestRunner : IDisposable
         yaml = SpeedTestConfig.SetScalar(yaml, SpeedTestConfig.KeyApiKey, ApiKey);
         yaml = SpeedTestConfig.SetScalar(yaml, SpeedTestConfig.KeyEnableWebUi, true);
 
-        var urls = new List<string>(subUrls);
-        if (withHistory)
+        // mihomo-overwrite-url 内置指向 http://127.0.0.1:8199/...，那个端口是
+        // 内核默认的 listen-port。我们改用随机端口后必须同步这个键，否则
+        // sub-store 会去连 8199 拿规则文件而 ECONNREFUSED，最终表现为
+        // 「获取 mihomo.yaml 失败, 状态码: 500」。
+        yaml = SpeedTestConfig.RetargetLocalOverwriteUrl(yaml, Port);
+
+        var urls = new List<string>();
+
+        if (nodeUris is { Count: > 0 } && _historyServer != null)
         {
-            var history = BuildHistoryMerged(keepRounds);
-            if (!string.IsNullOrWhiteSpace(history) && _historyServer != null)
+            // 指定节点模式：注入节点 URI 列表。此时不并入历史 ——
+            // 用户明确选了要测什么，混入历史快照里的节点会超出他的选择。
+            // （且历史快照是 Clash YAML，与 URI 列表格式不同，不能简单拼接。）
+            _historyServer.SetBody(string.Join("\n", nodeUris));
+            urls.Add($"http://127.0.0.1:{_historyServer.Port}/history.yaml");
+        }
+        else
+        {
+            urls.AddRange(subUrls);
+            if (withHistory)
             {
-                _historyServer.SetBody(history);
-                urls.Add($"http://127.0.0.1:{_historyServer.Port}/history.yaml");
+                var history = BuildHistoryMerged(keepRounds);
+                if (!string.IsNullOrWhiteSpace(history) && _historyServer != null)
+                {
+                    _historyServer.SetBody(history);
+                    urls.Add($"http://127.0.0.1:{_historyServer.Port}/history.yaml");
+                }
             }
         }
+
         yaml = SpeedTestConfig.SetStringList(yaml, SpeedTestConfig.KeySubUrls, urls);
         return yaml;
     }
@@ -246,11 +337,14 @@ public sealed class SpeedTestRunner : IDisposable
     /// 必须在内核进程启动之前完成 —— 内核的 listen-port「更新需重启」，
     /// 且 -f 指定的是启动那一刻读取的文件。先启动后写配置会导致
     /// 内核监听旧端口而探测打新端口，直接超时。
+    ///
+    /// nodeUris 非空时只测这些节点（见 BuildSessionYaml）。
     /// </summary>
-    public async Task PrepareAsync(List<string> subUrls, bool withHistory, int keepRounds)
+    public async Task PrepareAsync(List<string> subUrls, bool withHistory, int keepRounds,
+        List<string>? nodeUris = null)
     {
         AllocateOnly();
-        var yaml = BuildSessionYaml(subUrls, withHistory, keepRounds);
+        var yaml = BuildSessionYaml(subUrls, withHistory, keepRounds, nodeUris);
         WriteSessionYaml(yaml);
         await Task.CompletedTask;
     }
@@ -440,7 +534,7 @@ public sealed class SpeedTestRunner : IDisposable
         lock (_logGate)
         {
             _logTail.Append(line).Append('\n');
-            Common.TrimLogTail(_logTail);
+            SubSourceHelper.TrimLogTail(_logTail);
         }
         try { OnLog?.Invoke(line); } catch { }
     }
@@ -553,7 +647,7 @@ public sealed class SpeedTestRunner : IDisposable
     }
 
     /// <summary>快照内容（本轮通过节点）序列化为 Clash proxies 列表。</summary>
-    private static string ToClashYaml(SpeedTestSnapshot snap)
+    public static string ToClashYaml(SpeedTestSnapshot snap)
     {
         // 节点名与 SNI 可能含 " 或 \，直接嵌进双引号会生成损坏的 YAML，
         // 而这个文件又要被 BuildHistoryMerged 按行解析回来，必须转义。
@@ -564,7 +658,8 @@ public sealed class SpeedTestRunner : IDisposable
         sb.Append("proxies:\n");
         foreach (var n in snap.Nodes.Where(n => n.Passed))
         {
-            sb.Append($"  - {{name: \"{YQ(n.BaseName)}\", type: {n.Type}, server: {n.Server}, port: {n.Port}");
+            // 用 DisplayName：截断 | 后缀 + 带城市，Name/BaseName 保持原值不动
+            sb.Append($"  - {{name: \"{YQ(n.DisplayName)}\", type: {n.Type}, server: {n.Server}, port: {n.Port}");
             if (n.Tls) sb.Append(", tls: true");
             if (n.Udp) sb.Append(", udp: true");
             if (!string.IsNullOrEmpty(n.Network)) sb.Append($", network: {n.Network}");

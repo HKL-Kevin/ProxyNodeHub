@@ -76,11 +76,7 @@ public static class SpeedTestStore
 
     private static string Path_
     {
-        get
-        {
-            try { return System.IO.Path.Combine(Application.UserAppDataPath, FileName); }
-            catch { return System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ProxyNodeHub", FileName); }
-        }
+        get { return System.IO.Path.Combine(AppEnvironment.UserDataDir, FileName); }
     }
 
     private static Dictionary<string, SpeedStat> _stats = new(StringComparer.OrdinalIgnoreCase);

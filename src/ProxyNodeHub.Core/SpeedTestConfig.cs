@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Windows.Forms;
 
 namespace ProxyNodeHub;
 
@@ -29,12 +28,53 @@ public static class SpeedTestConfig
     public const string KeyApiKey = "api-key";
     public const string KeyEnableWebUi = "enable-web-ui";
 
+    // ── 测速快捷参数（设置页暴露给用户；不接管则沿用用户 config.yaml）──
+    public const string KeyTimeout = "timeout";
+    public const string KeyDownloadMb = "download-mb";
+    public const string KeyMinSpeed = "min-speed";
+    public const string KeySpeedConcurrent = "speed-concurrent";
+    public const string KeyConcurrent = "concurrent";
+    public const string KeySpeedTestUrl = "speed-test-url";
+
+    // ── 流媒体检测 ──
+    public const string KeyMediaCheck = "media-check";
+    public const string KeyMediaCheckTimeout = "media-check-timeout";
+    public const string KeyPlatforms = "platforms";
+
+    /// <summary>
+    /// 覆写订阅的规则文件 URL。内核默认写死 http://127.0.0.1:8199/...，
+    /// 依赖 listen-port —— 我们每次测速都把 listen-port 改成随机端口，
+    /// 这个键必须跟着改，否则 sub-store 会去连 8199 拿规则文件而
+    /// ECONNREFUSED（表现为「获取 mihomo.yaml 失败，状态码 500」）。
+    /// </summary>
+    public const string KeyMihomoOverwriteUrl = "mihomo-overwrite-url";
+
+    /// <summary>
+    /// 把 mihomo-overwrite-url 指向本轮的监听端口。
+    ///
+    /// 只改指向本机（127.0.0.1 / localhost）的 URL：那是内核的内置自引用，
+    /// 端口随 listen-port 浮动，必须同步。用户若把它改成了自己的外部规则
+    /// 地址，那是他的自定义配置，原样保留。
+    /// </summary>
+    public static string RetargetLocalOverwriteUrl(string yaml, int port)
+    {
+        var current = GetScalar(yaml, KeyMihomoOverwriteUrl);
+        if (string.IsNullOrEmpty(current)) return yaml;
+
+        if (!Uri.TryCreate(current, UriKind.Absolute, out var uri)) return yaml;
+        if (!uri.IsLoopback) return yaml;   // 用户自定义的外部地址，不动
+
+        var retargeted = new UriBuilder(uri) { Port = port }.Uri.ToString();
+        return SetScalar(yaml, KeyMihomoOverwriteUrl, retargeted);
+    }
+
     public static string RootDir
     {
         get
         {
-            try { return Path.Combine(Application.UserAppDataPath, "subcheck"); }
-            catch { return Path.Combine(Path.GetTempPath(), "ProxyNodeHub", "subcheck"); }
+            var env = Environment.GetEnvironmentVariable("PROXYNODEHUB_SUBCHECK_DIR");
+            if (!string.IsNullOrWhiteSpace(env)) return env.Trim();
+            return Path.Combine(AppEnvironment.UserDataDir, "subcheck");
         }
     }
 
@@ -48,21 +88,35 @@ public static class SpeedTestConfig
     /// <summary>
     /// 内核可执行文件路径。用户在「内核状态」里选了自定义位置就用那个，
     /// 否则用默认位置。空串与不存在的路径都回落到默认。
+    /// 容器里可用 PROXYNODEHUB_KERNEL_PATH 指定（Dockerfile 会预装内核）。
     /// </summary>
     public static string KernelPath
     {
         get
         {
+            var env = Environment.GetEnvironmentVariable("PROXYNODEHUB_KERNEL_PATH");
+            if (!string.IsNullOrWhiteSpace(env))
+            {
+                var p = env.Trim();
+                // 允许直接给可执行文件路径，或给所在目录
+                if (File.Exists(p)) return p;
+                if (Directory.Exists(p))
+                {
+                    var inDir = Path.Combine(p, AppEnvironment.KernelExecutableName);
+                    if (File.Exists(inDir)) return inDir;
+                }
+            }
+
             try
             {
                 var custom = AppSettings.Load().KernelPath;
                 if (!string.IsNullOrWhiteSpace(custom)
                     && Path.IsPathRooted(custom)
-                    && File.Exists(Path.Combine(custom, "subs-check.exe")))
-                    return Path.Combine(custom, "subs-check.exe");
+                    && File.Exists(Path.Combine(custom, AppEnvironment.KernelExecutableName)))
+                    return Path.Combine(custom, AppEnvironment.KernelExecutableName);
             }
             catch { }
-            return Path.Combine(RootDir, "subs-check.exe");
+            return Path.Combine(RootDir, AppEnvironment.KernelExecutableName);
         }
     }
 
@@ -242,6 +296,37 @@ public static class SpeedTestConfig
     {
         try { return File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : ""; }
         catch { return ""; }
+    }
+
+    /// <summary>
+    /// 把「设置页暴露的快捷参数」注入到 session.yaml。
+    /// 只在用户显式设过（非 null/非空）时覆盖 config.yaml 的原值 ——
+    /// 这样用户在 config.yaml 里手写的高级值不会被设置页的「空」覆盖。
+    /// </summary>
+    public static string ApplySettingsOverrides(string yaml, AppSettings s)
+    {
+        if (s.SpeedTimeout.HasValue)
+            yaml = SetScalar(yaml, KeyTimeout, s.SpeedTimeout.Value);
+        if (s.DownloadMb.HasValue)
+            yaml = SetScalar(yaml, KeyDownloadMb, s.DownloadMb.Value);
+        if (s.MinSpeed.HasValue)
+            yaml = SetScalar(yaml, KeyMinSpeed, s.MinSpeed.Value);
+        if (s.SpeedConcurrent.HasValue)
+            yaml = SetScalar(yaml, KeySpeedConcurrent, s.SpeedConcurrent.Value);
+        if (s.Concurrent.HasValue)
+            yaml = SetScalar(yaml, KeyConcurrent, s.Concurrent.Value);
+        if (!string.IsNullOrWhiteSpace(s.SpeedTestUrl))
+            yaml = SetScalar(yaml, KeySpeedTestUrl, s.SpeedTestUrl.Trim());
+
+        // 流媒体检测
+        if (s.MediaCheck.HasValue)
+            yaml = SetScalar(yaml, KeyMediaCheck, s.MediaCheck.Value);
+        if (s.MediaCheckTimeout.HasValue)
+            yaml = SetScalar(yaml, KeyMediaCheckTimeout, s.MediaCheckTimeout.Value);
+        if (s.Platforms != null)
+            yaml = SetStringList(yaml, KeyPlatforms, s.Platforms);
+
+        return yaml;
     }
 
     public static void WriteConfig(string yaml)

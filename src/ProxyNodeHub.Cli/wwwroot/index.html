@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>ProxyNodeHub · 节点仓库监控与智能聚合</title>
+<link rel="icon" href="/logo.png">
+<script>
+  // 立即初始化主题，防止白屏/暗色闪烁 (FOUC)
+  (function() {
+    try {
+      var saved = localStorage.getItem('theme') || 'auto';
+      if (saved === 'dark' || saved === 'light') {
+        document.documentElement.dataset.theme = saved;
+      } else {
+        var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.themeAuto = isDark ? 'dark' : 'light';
+      }
+    } catch(e) {}
+  })();
+</script>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ══════════ 页眉 ══════════ -->
+<header class="masthead">
+  <div class="mast-left">
+    <div class="mast-logo-wrap">
+      <img src="/logo.png" alt="ProxyNodeHub Logo" class="mast-logo">
+    </div>
+    <div class="mast-titles">
+      <div class="mast-title-row">
+        <h1>ProxyNodeHub</h1>
+        <span class="mast-badge">Web Console</span>
+      </div>
+      <p class="mast-sub">GitHub 免费节点仓库监控与智能聚合</p>
+    </div>
+  </div>
+  <div class="mast-right">
+    <span class="status-chip" id="kernelChip">内核检测中…</span>
+    <button class="icon-btn theme-toggle" id="btnThemeToggle" title="切换深色/浅色模式">
+      <span class="theme-icon">🌓</span>
+    </button>
+    <a href="https://github.com/beck-8/ProxyNodeHub" target="_blank" rel="noopener" class="icon-btn" title="查看 GitHub 仓库" id="btnGithub">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+    </a>
+  </div>
+</header>
+
+<!-- ══════════ 页签 ══════════ -->
+<nav class="tabs">
+  <button class="tab active" data-view="dashboard">🌍 节点分布</button>
+  <button class="tab" data-view="search">🔍 搜索分析</button>
+  <button class="tab" data-view="favorites">⭐ 收藏夹 <span class="badge" id="favCount">0</span></button>
+  <button class="tab" data-view="speedtest">⚡ 节点测速</button>
+  <button class="tab" data-view="settings">⚙️ 系统设置</button>
+</nav>
+
+<!-- ══════════ 节点分布视图（独立页）════════════ -->
+<main class="view active" id="view-dashboard">
+  <section class="dashboard-wrap">
+    <div class="dashboard-head">
+      <h2>🌍 全球节点地理分布</h2>
+      <span class="count-chip" id="worldMapCount">0 个节点</span>
+      <div class="spacer"></div>
+    </div>
+    <div class="dashboard-map" id="worldMapBody">
+      <div id="worldMap" class="world-map-svg"></div>
+      <div class="world-map-empty" id="worldMapEmpty">
+        还没有测速结果 —— 前往「节点测速」页完成一轮测速，通过节点的城市与家宽/机房属性将实时呈现在这里。
+      </div>
+      <div class="world-map-legend">
+        <span><i class="dot residential"></i> 家宽 Residential</span>
+        <span><i class="dot datacenter"></i> 机房 Datacenter</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════ 搜索视图 ══════════ -->
+<main class="view" id="view-search">
+
+  <!-- 工具栏 -->
+  <section class="toolbar">
+    <button class="btn primary" id="btnSearch">
+      <span class="ico">▶</span><span id="btnSearchText">搜索并分析</span>
+    </button>
+    <button class="btn" id="btnExport" disabled>导出</button>
+    <button class="btn" id="btnMerge" disabled>⚡ 合并订阅</button>
+    <div class="spacer"></div>
+    <label class="field inline">
+      <span>仓库数</span>
+      <input type="number" id="optCount" value="30" min="1" max="500">
+    </label>
+    <label class="field inline">
+      <span>天数</span>
+      <input type="number" id="optDays" value="7" min="1" max="365">
+    </label>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="optAutoProxy" checked>
+      <span>自动代理</span>
+    </label>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="optSkipSearched">
+      <span>跳过已搜索</span>
+    </label>
+  </section>
+
+  <!-- 筛选行 -->
+  <section class="filters">
+    <label class="field inline grow">
+      <span class="ico">🔍</span>
+      <input type="search" id="filterText" placeholder="快速筛选仓库名或描述关键词…">
+    </label>
+    <label class="field inline">
+      <span>未更新 ≥</span>
+      <input type="number" id="filterInactive" value="7" min="1" max="365">
+      <span>天</span>
+    </label>
+    <label class="field inline">
+      <span>日均提交 ≥</span>
+      <input type="number" id="filterCommits" value="0" min="0" max="50" step="0.1">
+    </label>
+    <label class="field inline">
+      <span>库龄 ≥</span>
+      <input type="number" id="filterAge" value="0" min="0" max="9999">
+      <span>天</span>
+    </label>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="filterAutoClean" checked>
+      <span>自动清理</span>
+    </label>
+    <span class="count-chip" id="repoCount">0 个仓库</span>
+  </section>
+
+  <!-- 进度条 -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar" id="progressBar"></div>
+    <span class="progress-text" id="progressText"></span>
+  </div>
+
+  <!-- 表格 -->
+  <section class="grid-wrap">
+    <table class="grid" id="grid">
+      <thead>
+        <tr>
+          <th data-sort="Repo" class="col-repo">仓库全名</th>
+          <th data-sort="Stars" class="num">Star</th>
+          <th data-sort="LastPush">最后更新</th>
+          <th data-sort="Status">状态</th>
+          <th data-sort="Commits" class="num">7天提交</th>
+          <th data-sort="Age" class="num">库龄</th>
+          <th data-sort="Processing">方式</th>
+          <th data-sort="Score" class="num sort-desc">活跃度</th>
+          <th data-sort="Nodes" class="num">节点数</th>
+          <th data-sort="Links" class="num">链接数</th>
+          <th data-sort="Usable" class="num">可用分</th>
+          <th data-sort="AvgSpeed" class="num">均速</th>
+          <th class="col-act"></th>
+        </tr>
+      </thead>
+      <tbody id="gridBody"></tbody>
+    </table>
+    <div class="empty" id="emptyHint">
+      <p class="empty-title">暂无搜索数据</p>
+      <p>点击上方「搜索并分析」开始自动化探测与评分。首次运行取决于网络状态约需 1~3 分钟。</p>
+    </div>
+  </section>
+
+  <!-- 详情面板 -->
+  <aside class="detail" id="detail">
+    <div class="detail-head">
+      <span class="detail-title" id="detailTitle">仓库详情</span>
+      <button class="btn tiny" id="btnDetailClose">✕</button>
+    </div>
+    <div class="detail-body" id="detailBody">
+      <p class="hint">点击结果行以查看该仓库探测到的订阅源地址与元数据详情。</p>
+    </div>
+  </aside>
+</main>
+
+<!-- ══════════ 收藏视图 ══════════ -->
+<main class="view" id="view-favorites">
+  <section class="grid-wrap full">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>仓库全名</th><th class="num">Star</th><th>状态</th>
+          <th class="num">节点数</th><th class="num">链接数</th><th class="col-act"></th>
+        </tr>
+      </thead>
+      <tbody id="favBody"></tbody>
+    </table>
+    <div class="empty" id="favEmpty">
+      <p class="empty-title">收藏夹为空</p>
+      <p>在搜索结果中点击 ☆ 图标即可收藏优质仓库，重启服务或重建容器后依然为您保留。</p>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════ 测速视图 ══════════ -->
+<main class="view" id="view-speedtest">
+
+  <!-- 第一步：选择来源并加载清单（不产生测速流量） -->
+  <section class="toolbar">
+    <button class="btn primary" id="btnLoadCatalog">
+      <span class="ico">↓</span><span id="btnLoadText">加载节点清单</span>
+    </button>
+    <div class="spacer"></div>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="catResults" checked>
+      <span>引用搜索结果</span>
+    </label>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="catFavorites">
+      <span>引用收藏夹</span>
+    </label>
+  </section>
+
+  <section class="filters">
+    <label class="field inline grow">
+      <span>手动订阅 URL（支持每行一条，下方勾选已保存订阅可快速追加）：</span>
+      <textarea id="catUrls" rows="2" placeholder="https://example.com/sub&#10;https://example.com/sub2"></textarea>
+    </label>
+  </section>
+
+  <section class="chips" id="catSubUrlChips" style="display:none">
+    <span class="chips-label">常用订阅</span>
+    <div class="chip-list" id="subUrlChips"></div>
+    <button class="chip manage-btn" id="btnManageSubUrls" title="管理常用订阅清单">⚙ 管理</button>
+  </section>
+
+  <div class="progress-wrap" id="catProgressWrap">
+    <div class="progress-bar" id="catProgressBar"></div>
+    <span class="progress-text" id="catProgressText"></span>
+  </div>
+
+  <!-- 第二步：清单（勾选要测的节点） -->
+  <section class="toolbar" id="catBar" style="display:none">
+    <button class="btn primary" id="btnTestSelected" disabled>
+      <span class="ico">▶</span><span id="btnTestText">测速选中节点</span>
+    </button>
+    <button class="btn" id="btnSelectAll">全选</button>
+    <button class="btn" id="btnSelectNone">清空</button>
+    <button class="btn" id="btnSelectFast">选前 20 个</button>
+    <div class="spacer"></div>
+    <span class="count-chip" id="catCount">0 个节点</span>
+  </section>
+
+  <!-- 筛选条：名称支持正则；协议与来源可多选 -->
+  <section class="filters" id="catFilters" style="display:none">
+    <label class="field inline grow">
+      <span>筛选节点</span>
+      <input type="search" id="catFilter" placeholder="支持正则：如 ^🇭🇰|HK-  或 SG|JP（默认按子串匹配）">
+      <span class="regex-hint" id="regexHint"></span>
+    </label>
+    <label class="field inline checkbox">
+      <input type="checkbox" id="catRegex" checked>
+      <span>正则模式</span>
+    </label>
+  </section>
+
+  <section class="chips" id="catProtocolChips" style="display:none">
+    <span class="chips-label">协议筛选</span>
+    <div class="chip-list" id="protocolChips"></div>
+  </section>
+
+  <section class="chips" id="catRepoChips" style="display:none">
+    <span class="chips-label">来源仓库</span>
+    <div class="chip-list" id="repoChips"></div>
+  </section>
+
+  <section class="chips" id="catRegionChips" style="display:none">
+    <span class="chips-label">地区预置</span>
+    <div class="chip-list" id="regionChips"></div>
+    <button class="chip manage-btn" id="btnManageRegions" title="管理地区正则预置">⚙ 管理</button>
+  </section>
+
+  <section class="grid-wrap" id="catWrap" style="display:none">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th class="col-chk"><input type="checkbox" id="chkAll"></th>
+          <th class="col-name">节点名称</th><th class="col-proto">协议</th>
+          <th class="col-server">服务器</th><th class="col-port">端口</th><th class="col-src">来源</th>
+        </tr>
+      </thead>
+      <tbody id="catBody"></tbody>
+    </table>
+  </section>
+
+  <div class="progress-wrap" id="spProgressWrap">
+    <div class="progress-bar" id="spProgressBar"></div>
+    <span class="progress-text" id="spProgressText"></span>
+  </div>
+
+  <section class="stats" id="spStats"></section>
+
+  <!-- 测速结果工具栏 -->
+  <section class="toolbar" id="spBar" style="display:none">
+    <button class="btn primary" id="btnExportPassed">
+      <span class="ico">↓</span><span>导出可用测速结果 (Clash YAML)</span>
+    </button>
+    <div class="spacer"></div>
+    <span class="count-chip" id="spPassedCount">0 个通过</span>
+  </section>
+
+  <!-- 第三步：测速结果 -->
+  <section class="grid-wrap full" id="spWrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th class="col-name">节点名称</th><th class="col-proto">协议</th><th class="col-server">服务器</th>
+          <th class="num col-speed">下载速度</th><th class="col-country">国家地区</th>
+          <th class="col-city">城市 / 运营商</th>
+          <th class="col-ip">IP风险</th><th class="col-media">流媒体</th><th class="col-src">来源</th>
+        </tr>
+      </thead>
+      <tbody id="spBody"></tbody>
+    </table>
+    <div class="empty" id="spEmpty">
+      <p class="empty-title">暂无测速记录</p>
+      <p>首先点击「加载节点清单」拉取并解析节点，勾选所需节点后点击「测速选中节点」。<br>
+         测速会对选中节点进行真实流量下载与延迟测试，按需测速更加高效省流。</p>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════ 设置视图（左菜单 + 右内容）════════════ -->
+<main class="view" id="view-settings">
+  <aside class="settings-nav">
+    <button class="settings-nav-item active" data-settings="github">🔑 GitHub 令牌</button>
+    <button class="settings-nav-item" data-settings="search">🎯 搜索参数</button>
+    <button class="settings-nav-item" data-settings="services">🌐 服务与订阅</button>
+    <button class="settings-nav-item" data-settings="speedtest">⚡ 测速内核配置</button>
+  </aside>
+
+  <div class="settings-content">
+    <!-- ═══ GitHub 令牌 ═══ -->
+    <section class="panel settings-pane active" data-pane="github">
+      <h2>GitHub 个人访问令牌 (Token)</h2>
+      <p class="hint">未设置令牌时 GitHub 匿名 API 限制为每小时 60 次；配置个人访问令牌后将提升至 5000 次/小时。令牌安全保存在本地 settings.json。</p>
+      <div class="row">
+        <input type="password" id="setToken" placeholder="ghp_… (留空则保持当前设置不变)">
+        <button class="btn primary" id="btnSaveToken">保存令牌</button>
+      </div>
+      <p class="hint" id="tokenState"></p>
+    </section>
+
+    <!-- ═══ 搜索默认值 ═══ -->
+    <section class="panel settings-pane" data-pane="search">
+      <h2>搜索与过滤参数默认值</h2>
+      <div class="row">
+        <label class="field inline"><span>目标仓库数</span><input type="number" id="setRepoCount" min="1" max="500"></label>
+        <label class="field inline"><span>未更新 ≥</span><input type="number" id="setInactive" min="1" max="365"><span>天</span></label>
+        <label class="field inline"><span>日均提交 ≥</span><input type="number" id="setCommits" min="0" max="50" step="0.1"></label>
+        <label class="field inline"><span>库龄 ≥</span><input type="number" id="setAge" min="0" max="9999"><span>天</span></label>
+        <label class="field inline checkbox"><input type="checkbox" id="setAutoClean"><span>自动清理不活跃仓库</span></label>
+      </div>
+      <button class="btn primary" id="btnSaveSettings">保存设置</button>
+    </section>
+
+    <!-- ═══ 服务地址 ═══ -->
+    <section class="panel settings-pane" data-pane="services">
+      <h2>服务地址与常用订阅</h2>
+
+      <h3 class="panel-sub">订阅转换后端</h3>
+      <p class="hint">若订阅包含非 URI 原始格式（如 Clash YAML / sing-box），配置 <a href="https://github.com/bestruirui/MiniSubConvert" target="_blank" rel="noopener">MiniSubConvert</a> 或 subconverter 端点后，将在加载清单时统一转换为通用 URI。留空表示直连解析。</p>
+      <div class="row">
+        <input type="text" id="setSubConverter" placeholder="http://127.0.0.1:3001/minisubconvert/sub">
+        <button class="btn primary" id="btnSaveSubConverter">保存端点</button>
+      </div>
+
+      <h3 class="panel-sub">IP 地理信息查询 (ipinfo.io)</h3>
+      <p class="hint">测速通过后按出口 IP 批量获取城市、省份、ASN、ISP 及家宽/机房类型标识。免费注册获取 Token: <a href="https://ipinfo.io/signup" target="_blank" rel="noopener">ipinfo.io/signup</a>。留空表示不查询。</p>
+      <div class="row">
+        <input type="password" id="setIpInfoToken" placeholder="ipinfo.io API Token（留空不查询）">
+        <button class="btn primary" id="btnSaveIpInfoToken">保存 Token</button>
+      </div>
+
+      <h3 class="panel-sub">测速内核状态</h3>
+      <p class="hint" id="kernelInfo"></p>
+      <button class="btn" id="btnInstallKernel">检查并安装最新测速内核</button>
+
+      <h3 class="panel-sub">预存常用订阅</h3>
+      <p class="hint">预先保存常用的私有或公共订阅 URL，在测速页点击标签即可一键引入，无需反复粘贴。</p>
+      <div id="subUrlEditList" class="preset-edit-list"></div>
+      <button class="btn" id="btnAddSubUrl">+ 添加订阅地址</button>
+      <button class="btn primary" id="btnSaveSubUrls" style="margin-left:8px">保存订阅清单</button>
+    </section>
+
+    <!-- ═══ 测速参数 ═══ -->
+    <section class="panel settings-pane" data-pane="speedtest">
+      <h2>测速内核执行参数</h2>
+      <p class="hint">自定义配置将写入 session.yaml 覆盖内核默认值。留空则代表使用内核内建缺省值。</p>
+
+      <h3 class="panel-sub">并发与阈值</h3>
+      <div class="row wrap">
+        <label class="field inline"><span>测活超时</span><input type="number" id="setSpeedTimeout" min="500" max="30000" step="500" placeholder="5000"><span>ms</span></label>
+        <label class="field inline"><span>单节点下载量</span><input type="number" id="setDownloadMb" min="0" max="200" placeholder="20"><span>MB</span></label>
+        <label class="field inline"><span>最低达标速度</span><input type="number" id="setMinSpeed" min="0" max="10000" step="50" placeholder="512"><span>KB/s</span></label>
+        <label class="field inline"><span>测活并发数</span><input type="number" id="setConcurrent" min="1" max="200" placeholder="50"></label>
+        <label class="field inline"><span>测速并发数</span><input type="number" id="setSpeedConcurrent" min="1" max="200" placeholder="20"></label>
+      </div>
+
+      <h3 class="panel-sub">测速下载目标 URL</h3>
+      <label class="field inline grow">
+        <input type="text" id="setSpeedTestUrl" placeholder="https://github.com/.../release.zip（建议使用国内或多线可达 CDN 测试包）">
+      </label>
+
+      <h3 class="panel-sub">流媒体解锁检测</h3>
+      <p class="hint">启用后对可用节点并发运行主流流媒体解锁、IP 欺诈度及原生类型检测。</p>
+      <div class="row wrap">
+        <label class="field inline checkbox"><input type="checkbox" id="setMediaCheck"><span>启用流媒体及 IP 解锁检测</span></label>
+        <label class="field inline"><span>单平台超时</span><input type="number" id="setMediaCheckTimeout" min="1" max="60" placeholder="5"><span>s</span></label>
+      </div>
+      <p class="hint">选择要检测的流媒体平台（精简选择可显著提高测速速度）：</p>
+      <div class="chips" style="padding:6px 0;border:none;background:none">
+        <div class="chip-list" id="platformChips"></div>
+      </div>
+
+      <button class="btn primary" id="btnSaveSpeed" style="margin-top:10px">保存测速配置</button>
+      <p class="hint" id="speedHint"></p>
+    </section>
+  </div>
+</main>
+
+<!-- ══════════ 日志抽屉 ══════════ -->
+<section class="logdrawer" id="logDrawer">
+  <div class="log-head">
+    <span class="log-title">实时运行终端</span>
+    <span class="log-count" id="logCount">0</span>
+    <div class="spacer"></div>
+    <button class="btn tiny" id="btnLogClear">清空日志</button>
+    <button class="btn tiny" id="btnLogToggle">▾</button>
+  </div>
+  <pre class="log-body" id="logBody"></pre>
+</section>
+
+<!-- ══════════ 导出通用弹窗 ══════════ -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <span id="modalTitle">导出结果</span>
+      <button class="btn tiny" id="btnModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="modalHint"></p>
+      <textarea id="modalText" readonly></textarea>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnModalCopy">复制文本</button>
+      <button class="btn primary" id="btnModalDownload">下载文件</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 地区预置管理弹窗 ══════════ -->
+<div class="modal-backdrop" id="regionModalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <span>地区预置正则管理</span>
+      <button class="btn tiny" id="btnRegionModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">每行一个预置规则：名称显示在筛选标签上，Pattern 为正则表达式片段（多选时将自动通过 OR 逻辑合并过滤）。</p>
+      <div id="regionEditList" class="preset-edit-list"></div>
+      <button class="btn" id="btnAddRegion">+ 添加地区规则</button>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnRegionModalCancel">取消</button>
+      <button class="btn primary" id="btnRegionModalSave">保存规则</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

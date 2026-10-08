@@ -9,8 +9,7 @@ namespace ProxyNodeHub;
 public static class LogStore
 {
     private static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ProxyNodeHub", "log.txt");
+        AppEnvironment.UserDataDir, "log.txt");
 
     /// <summary>日志保存天数（超过则自动清理）</summary>
     public static int SaveDays { get; set; } = 1;

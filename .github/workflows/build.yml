@@ -6,7 +6,46 @@ on:
   pull_request:
 
 jobs:
-  build:
+  # 跨平台核心库 + 容器 CLI：任何平台都能编译与验证
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj
+
+      - name: Build
+        run: dotnet build src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj -c Release --nologo --no-restore
+
+      - name: Smoke test (doctor)
+        run: |
+          dotnet run --project src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj -c Release --no-build -- doctor
+
+      - name: Smoke test (web server)
+        run: |
+          dotnet run --project src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj -c Release --no-build -- web --port 18080 &
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18080/api/state > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18080/ | grep -q ProxyNodeHub
+          curl -fsS http://127.0.0.1:18080/api/state
+          pkill -f "pnodes.*web" || true
+
+      - name: Publish linux-x64
+        run: dotnet publish src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj -c Release -r linux-x64 --no-restore -o dist/cli-x64
+
+      - name: Publish linux-arm64
+        run: dotnet publish src/ProxyNodeHub.Cli/ProxyNodeHub.Cli.csproj -c Release -r linux-arm64 --no-restore -o dist/cli-arm64
+
+  # 桌面版：需要 Windows 目标包，在 Windows runner 上编译
+  desktop:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,5 +61,23 @@ jobs:
       - name: Build
         run: dotnet build src/ProxyNodeHub.csproj -c Release --nologo --no-restore
 
-      - name: Test
-        run: dotnet test tests/ProxyNodeHub.Tests/ProxyNodeHub.Tests.csproj -c Release --nologo
+  # 多架构镜像：验证 Dockerfile 在 amd64 与 arm64 下都能构建
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,61 @@
+# ProxyNodeHub 容器编排
+#
+# ── Web 管理界面（默认，推荐）──
+#   docker compose up -d
+#   浏览器打开 http://localhost:8080
+#
+# ── 批处理（跑完即退）──
+#   docker compose run --rm pnodes search -n 20
+#   docker compose run --rm pnodes merge https://example.com/sub
+#   docker compose run --rm pnodes speedtest https://example.com/sub
+#
+# 结果与配置都落在命名卷 pnodes-data 里。
+# 想直接看到文件，把 volumes 换成宿主目录，例如 - ./data:/data
+
+services:
+  pnodes:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pnodes:latest
+    container_name: pnodes
+
+    # 按需指定平台；多架构镜像会自动匹配宿主架构，一般无需设置。
+    # platform: linux/arm64
+
+    ports:
+      # 宿主端口:容器端口。容器内固定监听 8080（见 Dockerfile 的 CMD）。
+      # 只允许本机访问可写成 "127.0.0.1:8080:8080"。
+      - "8080:8080"
+
+    environment:
+      # 强烈建议设置：匿名 GitHub API 限额仅 60 次/小时，设置后为 5000。
+      # 也可在宿主机 export GITHUB_TOKEN 后由下面一行透传，
+      # 或启动后在 Web 界面的「设置」里填写。
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+
+      # 数据与输出目录（镜像内已设默认值，这里显式写出便于理解）
+      - PROXYNODEHUB_DATA_DIR=/data
+      - PROXYNODEHUB_OUTPUT_DIR=/data/output
+
+      # 测速内核（镜像构建时已预装）
+      - PROXYNODEHUB_KERNEL_PATH=/opt/subs-check/subs-check
+
+      # 容器时区，影响输出文件与界面里的时间戳
+      - TZ=${TZ:-Asia/Shanghai}
+
+    volumes:
+      # 命名卷：持久化搜索历史、特征库、测速快照与导出结果
+      - pnodes-data:/data
+
+    # 搜索与测速都是网络密集任务，给足文件描述符
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    # Web 界面常驻；崩溃后自动重启
+    restart: unless-stopped
+
+volumes:
+  pnodes-data:

@@ -34,8 +34,7 @@ public class RepoFeature
 public static class FeatureLibrary
 {
     private static readonly string LibPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ProxyNodeHub", "features.json");
+        AppEnvironment.UserDataDir, "features.json");
 
     private static Dictionary<string, RepoFeature> _features = new();
     private static bool _loaded = false;

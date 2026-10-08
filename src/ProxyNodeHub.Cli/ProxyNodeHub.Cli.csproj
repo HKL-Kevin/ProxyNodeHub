@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    无界面 CLI + Web 管理界面，供 Docker 容器（linux/amd64、linux/arm64）使用。
+    只依赖 ProxyNodeHub.Core，不引用任何 WinForms/Drawing —— 保证能在
+    精简的 Linux 运行时镜像里跑起来。
+
+    用 Web SDK 而非普通 SDK：web 命令需要 ASP.NET Core 的最小 API 与
+    静态文件服务。不用 Web SDK 的话得手工加 FrameworkReference，
+    反而更容易漏。批处理命令（search/merge/speedtest）不受影响。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ProxyNodeHub.Cli</RootNamespace>
+    <AssemblyName>pnodes</AssemblyName>
+    <Version>0.0.1</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 单文件发布：镜像里只需一个可执行文件 + 运行时依赖 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ProxyNodeHub.Core\ProxyNodeHub.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Web 前端资源内嵌进程序集：容器里只需拷贝一个可执行文件，
+         不必额外同步 wwwroot 目录，也不会因工作目录不同而找不到。 -->
+    <EmbeddedResource Include="wwwroot\index.html" />
+    <EmbeddedResource Include="wwwroot\app.js" />
+    <EmbeddedResource Include="wwwroot\style.css" />
+    <EmbeddedResource Include="wwwroot\world.svg" />
+  </ItemGroup>
+
+</Project>

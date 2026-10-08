@@ -1,5 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    Windows 桌面版（WinForms）。跨平台核心逻辑已抽到 ../ProxyNodeHub.Core，
+    本项目只保留 UI 层，通过 ProjectReference 复用同一份核心代码 ——
+    桌面版与 Docker 容器里的 CLI 共享 GitHub 搜索、探测、去重、测速逻辑。
+  -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -12,6 +17,8 @@
     <AssemblyName>ProxyNodeHub</AssemblyName>
     <Version>0.0.1</Version>
     <ApplicationIcon>logo.ico</ApplicationIcon>
+    <!-- 允许在非 Windows 主机上交叉编译（CI/开发机验证用）；在 Windows 上无影响 -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <!-- 自包含版 -->
@@ -24,13 +31,28 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- token 已改为明文存 exe 同目录 settings.json，不再用 DPAPI 加密 -->
+    <ProjectReference Include="ProxyNodeHub.Core\ProxyNodeHub.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Core 与 Cli 都是 src/ 的子目录，默认 glob 会把它们的源码与 obj 产物
+       一并吸进本项目，导致重复的 AssemblyInfo 与重复编译。
+       显式排除，只保留本目录的 UI 源码。 -->
+  <ItemGroup>
+    <Compile Remove="ProxyNodeHub.Core\**" />
+    <Compile Remove="ProxyNodeHub.Cli\**" />
+    <None Remove="ProxyNodeHub.Core\**" />
+    <None Remove="ProxyNodeHub.Cli\**" />
+    <EmbeddedResource Remove="ProxyNodeHub.Core\**" />
+    <EmbeddedResource Remove="ProxyNodeHub.Cli\**" />
+    <Content Remove="ProxyNodeHub.Core\**" />
+    <Content Remove="ProxyNodeHub.Cli\**" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- 用 Content 而非 None：None+CopyToOutputDirectory 只影响 build 输出，
-         dotnet publish 不会带上它，发布出去的 exe 会缺 known_repos.json -->
-    <Content Include="known_repos.json">
+         dotnet publish 不会带上它，发布出去的 exe 会缺 known_repos.json。
+         Core 里是 EmbeddedResource（CLI 用），这里仍按文件分发（桌面版沿用原行为）。 -->
+    <Content Include="ProxyNodeHub.Core\known_repos.json" Link="known_repos.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

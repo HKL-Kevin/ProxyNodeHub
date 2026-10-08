@@ -200,8 +200,12 @@ public class GitHubService
     // ── 下载 raw 文件 (使用当前选中的代理) ──
     public async Task<string?> GetUrlAsync(string url, CancellationToken ct = default)
     {
+        // 转换后端 / 非 raw URL 不走加速镜像：那些地址本来就不在
+        // raw.githubusercontent.com 上，套代理前缀只会让它 404。
+        bool useProxy = url.StartsWith(RawBaseLen, StringComparison.OrdinalIgnoreCase);
+
         // 1. 如果选了代理, 优先用代理
-        if (CurrentProxy != null && !CurrentProxy.IsDefault)
+        if (useProxy && CurrentProxy != null && !CurrentProxy.IsDefault)
         {
             var proxiedUrl = BuildProxiedUrl(url, CurrentProxy);
             if (proxiedUrl != null)
@@ -216,7 +220,7 @@ public class GitHubService
         if (direct != null) return direct;
 
         // 3. 直连失败 → 自动尝试所有代理 (按延迟排序)
-        if (url.StartsWith(RawBaseLen, StringComparison.OrdinalIgnoreCase))
+        if (useProxy)
         {
             var sortedProxies = AllProxies
                 .Where(p => !p.IsDefault && p.LatencyMs > 0)

@@ -24,7 +24,21 @@ namespace ProxyNodeHub;
 [JsonSerializable(typeof(SpeedTestSnapshot), TypeInfoPropertyName = "SpeedTestSnapshot")]
 [JsonSerializable(typeof(SpeedTestStatus), TypeInfoPropertyName = "SpeedTestStatus")]
 [JsonSerializable(typeof(List<SpeedStat>), TypeInfoPropertyName = "SpeedStatList")]
+[JsonSerializable(typeof(List<NodeCatalog.NodeEntry>), TypeInfoPropertyName = "NodeEntryList")]
+[JsonSerializable(typeof(List<RegexPreset>), TypeInfoPropertyName = "RegexPresetList")]
+[JsonSerializable(typeof(List<SubUrlEntry>), TypeInfoPropertyName = "SubUrlEntryList")]
+[JsonSerializable(typeof(Dictionary<string, IpInfo>), TypeInfoPropertyName = "IpInfoDict")]
 internal partial class AppJsonContext : JsonSerializerContext;
+
+/// <summary>
+/// Web/CLI 专用的 JSON 上下文，供 WebState 持久化跨重启状态使用。
+/// 单独开一个而不复用 AppJsonContext，是为了避免 Core 对 Cli 的反向依赖。
+/// </summary>
+[JsonSourceGenerationOptions(IncludeFields = true, PropertyNameCaseInsensitive = true)]
+[JsonSerializable(typeof(List<RepoInfo>), TypeInfoPropertyName = "WebRepoList")]
+[JsonSerializable(typeof(List<NodeCatalog.NodeEntry>), TypeInfoPropertyName = "WebNodeEntryList")]
+[JsonSerializable(typeof(SpeedTestSnapshot), TypeInfoPropertyName = "WebSpeedTestSnapshot")]
+public partial class WebJsonContext : JsonSerializerContext;
 
 // ── 模型 ──
 /// <summary>

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    跨平台核心库：GitHub 搜索、六层探测、节点解析去重、测速内核管理。
+    刻意保持 net8.0（不带 -windows）且不引用 WinForms —— 这样 Linux
+    容器里的 CLI 与 Windows 桌面版能共用同一份逻辑，改一处两边都生效。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ProxyNodeHub</RootNamespace>
+    <AssemblyName>ProxyNodeHub.Core</AssemblyName>
+    <Version>0.0.1</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- known_repos.json 随库分发；宿主项目的 publish 会一并带上 -->
+    <EmbeddedResource Include="known_repos.json" />
+    <!-- 图标：桌面版的 About 对话框与 Web 界面都要用。
+         放在 Core 而非各宿主项目，避免两处各存一份、改一处另一处不更新。 -->
+    <EmbeddedResource Include="..\logo.png" Link="logo.png" />
+  </ItemGroup>
+
+</Project>

@@ -38,20 +38,11 @@ public static class Common
         catch { }
     }
 
-    /// <summary>订阅来源 → 带备注的 URL。备注让内核把来源写进节点名与 subTag，
-    /// 测速结果才能映射回仓库。备注只保留安全字符，避免 URL 片段解析出问题。</summary>
+    /// <summary>订阅来源 → 带备注的 URL。实现已下沉到 Core，两边共用一份。</summary>
     public static List<string> ToTaggedUrls(IEnumerable<SubSource> sources)
-        => sources.Select(s =>
-        {
-            if (string.IsNullOrEmpty(s.Repo)) return s.Url;
-            var tag = new string(s.Repo.Select(c =>
-                char.IsLetterOrDigit(c) || c is '/' or '-' or '_' or '.' ? c : '_').ToArray());
-            return $"{s.Url}#{tag}";
-        }).ToList();
+        => SubSourceHelper.ToTaggedUrls(sources);
 
     /// <summary>日志缓冲超过上限时裁掉最旧的一段，防止内存无限增长。</summary>
     public static void TrimLogTail(StringBuilder sb)
-    {
-        if (sb.Length > 60000) sb.Remove(0, 20000);
-    }
+        => SubSourceHelper.TrimLogTail(sb);
 }

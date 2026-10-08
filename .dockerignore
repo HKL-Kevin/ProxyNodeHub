@@ -1,0 +1,42 @@
+# 构建上下文瘦身：只把 src/ 下两个跨平台项目送进构建阶段。
+# 桌面版（WinForms）、图片、git 历史、本地构建产物都与镜像无关。
+
+.git
+.github
+.gitignore
+
+# 桌面版 UI 与资源（镜像里跑不了 WinForms）
+src/*.cs
+src/*.ico
+src/ProxyNodeHub.csproj
+src/obj/
+src/bin/
+# 注意：src/logo.png 不能排除 —— Core 把它内嵌为 Web 界面的图标资源。
+
+# 构建产物
+**/bin/
+**/obj/
+dist/
+Releases/
+
+# 本地与文档
+images/
+*.md
+LICENSE
+build.ps1
+ProxyNodeHub.slnx
+
+# 容器编排（不进镜像）
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 用户数据（绝不进镜像）
+**/settings.json
+**/features.json
+**/searched_repos.json
+**/speed_stats.json
+**/favorites.json
+**/custom_features.json
+**/cache.json
+**/log.txt

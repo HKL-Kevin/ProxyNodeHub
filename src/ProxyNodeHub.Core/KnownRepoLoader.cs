@@ -35,11 +35,14 @@ public static class KnownRepoLoader
 
         _cache = new Dictionary<string, List<KnownRepoEntry>>(StringComparer.OrdinalIgnoreCase);
 
+        // 优先读磁盘文件（用户可编辑，桌面版沿用此路径）；
+        // 读不到再退回内嵌资源 —— 容器镜像里只有单个可执行文件，
+        // 不带外置 json，没有回退就完全丢失这份映射。
+        var json = ReadConfigJson();
         try
         {
-            if (File.Exists(ConfigPath))
+            if (!string.IsNullOrEmpty(json))
             {
-                var json = File.ReadAllText(ConfigPath);
                 var config = JsonSerializer.Deserialize(json, AppJsonContext.Default.KnownRepoConfig);
                 if (config != null)
                 {
@@ -59,6 +62,28 @@ public static class KnownRepoLoader
         catch { /* 解析失败时返回空配置 */ }
 
         return _cache;
+    }
+
+    private static string? ReadConfigJson()
+    {
+        try
+        {
+            if (File.Exists(ConfigPath)) return File.ReadAllText(ConfigPath);
+        }
+        catch { }
+
+        try
+        {
+            var asm = typeof(KnownRepoLoader).Assembly;
+            var name = Array.Find(asm.GetManifestResourceNames(),
+                n => n.EndsWith("known_repos.json", StringComparison.OrdinalIgnoreCase));
+            if (name == null) return null;
+            using var stream = asm.GetManifestResourceStream(name);
+            if (stream == null) return null;
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+        catch { return null; }
     }
 
     /// <summary>获取指定仓库的已知订阅链接</summary>

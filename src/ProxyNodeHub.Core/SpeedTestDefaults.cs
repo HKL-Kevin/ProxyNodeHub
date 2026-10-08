@@ -128,7 +128,10 @@ filter:
   # - "SP-"                      # 保留解锁 Spotify 的节点
 
 # 是否开启流媒体检测，其中IP欺诈依赖重命名
-media-check: false
+# 开启后每个存活节点会跑流媒体解锁检测 + IP 欺诈分数 + IP 查询，
+# 节点结果的 ip / ipRisk / media / country 字段才会被填充。
+# 关闭则这些字段全空（ProxyNodeHub 的 ipinfo.io 补查也拿不到 IP）。
+media-check: true
 # 流媒体检测超时时间(秒)，未设置则默认为10秒
 media-check-timeout: 5
 platforms:
