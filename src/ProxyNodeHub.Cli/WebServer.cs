@@ -377,6 +377,14 @@ public static class WebServer
             return Results.Json(new { enriched = count });
         });
 
+        api.MapPost("/alive/probe", () =>
+        {
+            var ok = state.StartAlivePoolProbe();
+            return ok
+                ? Results.Ok(new { started = true })
+                : Results.Conflict(new { error = "已有测速/流水线在进行，或存活池为空" });
+        });
+
         api.MapPost("/speedtest/alive", (SpeedRequest? req) =>
         {
             var ok = state.StartSpeedTestFromAlivePool(req?.WithHistory ?? false, req?.KeepRounds ?? 3);

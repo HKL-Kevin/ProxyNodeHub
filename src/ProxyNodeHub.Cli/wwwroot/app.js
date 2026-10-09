@@ -1514,6 +1514,16 @@ async function speedTestAlivePool() {
   }
 }
 
+async function probeAlivePool() {
+  try {
+    await api('/alive/probe', { method: 'POST' });
+    toast('已启动存活池真实落地探测', 'success');
+    openLog();
+  } catch (e) {
+    toast('启动探测失败: ' + e.message, 'error');
+  }
+}
+
 function exportAlivePool() {
   window.open('/api/export/alive', '_blank');
 }
@@ -1548,6 +1558,7 @@ document.addEventListener('keydown', (e) => {
   $('btnCancelPipeline')?.addEventListener('click', cancelPipeline);
   $('btnSpeedTestAlive')?.addEventListener('click', speedTestAlivePool);
   $('btnSpeedTestAliveDirect')?.addEventListener('click', speedTestAlivePool);
+  $('btnProbeAlive')?.addEventListener('click', probeAlivePool);
   $('btnExportAlive')?.addEventListener('click', exportAlivePool);
   $('btnRefreshAlive')?.addEventListener('click', loadAliveNodes);
   $('aliveCountrySel')?.addEventListener('change', loadAliveNodes);

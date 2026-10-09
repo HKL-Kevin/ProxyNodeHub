@@ -776,6 +776,10 @@ public sealed class WebState
             var changed = SpeedResultAggregator.ApplyRound(snap);
             runner.SaveRound(snap, kernelYaml);
             SaveNodes(snap, kernelYaml);
+            if (!string.IsNullOrWhiteSpace(kernelYaml))
+            {
+                AliveNodeStore.SaveRound(kernelYaml, snap.Nodes);
+            }
             Log($"测速完成: {snap.Nodes.Count} 个节点，{snap.Nodes.Count(n => n.Passed)} 个通过" +
                 (changed > 0 ? $" · 已更新 {changed} 个仓库的可用分" : ""), "success");
         }
@@ -1231,6 +1235,133 @@ public sealed class WebState
                 {
                     SpeedTesting = false;
                     SpeedStatus = null;
+                }
+            }
+        }, ct);
+
+        return true;
+    }
+
+    /// <summary>
+    /// 对 SQLite 存活池中的现有节点发起极速落地出口 IP 与地理位置探测（0 字节测速）。
+    /// 几秒内即可为存活池节点补齐真实的出口公网 IP、真实国家、城市与运营商。
+    /// </summary>
+    public bool StartAlivePoolProbe()
+    {
+        var aliveYaml = AliveNodeStore.ExportClashYaml();
+        if (string.IsNullOrWhiteSpace(aliveYaml) || aliveYaml == "proxies: []\n")
+        {
+            Log("存活池为空，请先运行流水线生成存活池。", "warn");
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (SpeedTesting || PipelineRunning) return false;
+            PipelineRunning = true;
+            PipelinePhase = "probing_alive";
+            PipelineMessage = "正在对存活池节点探测真实落地出口 IP 与地理位置…";
+            _pipelineCts = new CancellationTokenSource();
+        }
+
+        var ct = _pipelineCts!.Token;
+        _ = Task.Run(async () =>
+        {
+            SpeedTestRunner? runner = null;
+            try
+            {
+                var kernel = SpeedTestConfig.KernelPath;
+                if (!File.Exists(kernel))
+                {
+                    Log($"未找到测速内核: {kernel}", "error");
+                    return;
+                }
+
+                var stats = AliveNodeStore.GetStats();
+                Log($"[存活探测] 启动存活池落地 IP 探测 · 节点数: {stats.TotalCount} 个（0 字节测速）…");
+
+                runner = new SpeedTestRunner();
+                runner.OnLog += line => Log(line, KernelLevel(line));
+
+                // 传入 aliveOnly: true (已配置 media-check: true + platforms: ["iprisk"])
+                await runner.PrepareAsync(new List<string>(), withHistory: false, keepRounds: 0,
+                    nodeUris: null, aliveOnly: true, customYamlBody: aliveYaml);
+                await runner.StartAsync(m => Log(m), ct);
+                await runner.TriggerAsync(ct);
+
+                await PollUntilDoneAsync(runner, ct);
+
+                var snap = await runner.GetResultsAsync(CancellationToken.None);
+                var kernelYaml = await runner.GetPassedSubscriptionAsync(CancellationToken.None);
+                if (string.IsNullOrWhiteSpace(kernelYaml))
+                {
+                    var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+                    if (File.Exists(diskPath))
+                    {
+                        try { kernelYaml = File.ReadAllText(diskPath); } catch { }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(kernelYaml) && snap?.Nodes != null)
+                {
+                    var token = Settings.IpInfoToken;
+                    if (!string.IsNullOrWhiteSpace(token))
+                    {
+                        var ips = snap.Nodes.Where(n => !string.IsNullOrWhiteSpace(n.Ip))
+                            .Select(n => n.Ip!).Distinct().ToList();
+                        if (ips.Count > 0)
+                        {
+                            Log($"[存活探测] 批量查询 {ips.Count} 个真实出口 IP 的地理位置与运营商…");
+                            try
+                            {
+                                var ipInfo = await IpInfoService.LookupAsync(ips, token, m => Log(m), CancellationToken.None);
+                                foreach (var n in snap.Nodes)
+                                {
+                                    if (n.Ip != null && ipInfo.TryGetValue(n.Ip, out var info))
+                                    {
+                                        n.IpInfoCity = info.City;
+                                        n.IpInfoRegion = info.Region;
+                                        n.IpInfoOrg = info.Org;
+                                        n.IpInfoAsn = info.Asn;
+                                        n.IpInfoLoc = info.Loc;
+                                        if (string.IsNullOrWhiteSpace(n.Country) && !string.IsNullOrWhiteSpace(info.Country))
+                                        {
+                                            n.Country = info.Country;
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"[存活探测] IP 查询异常: {ex.Message}", "warn");
+                            }
+                        }
+                    }
+
+                    var (ins, upd) = AliveNodeStore.SaveRound(kernelYaml, snap.Nodes);
+                    Log($"[存活探测] 完成: 已更新 {upd} 个存活节点的真实落地数据", "success");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Log("[取消] 存活探测已取消", "warn");
+            }
+            catch (Exception ex)
+            {
+                Log($"[存活探测] 异常: {ex.Message}", "error");
+            }
+            finally
+            {
+                if (runner != null)
+                {
+                    try { await runner.StopAsync(); } catch { }
+                    runner.Dispose();
+                }
+                lock (_gate)
+                {
+                    PipelineRunning = false;
+                    PipelinePhase = "";
+                    PipelineMessage = "";
                 }
             }
         }, ct);
