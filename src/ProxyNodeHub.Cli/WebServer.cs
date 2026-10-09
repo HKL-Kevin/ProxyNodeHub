@@ -84,6 +84,10 @@ public static class WebServer
             searchDone = state.SearchDone,
             searchTotal = state.SearchTotal,
             searchMessage = state.SearchMessage,
+            pipelineRunning = state.PipelineRunning,
+            pipelinePhase = state.PipelinePhase,
+            pipelineMessage = state.PipelineMessage,
+            aliveCount = AliveNodeStore.GetStats().TotalCount,
             speedTesting = state.SpeedTesting,
             speedStatus = state.SpeedStatus,
             speedFinishedAt = state.SpeedFinishedAt,
@@ -326,6 +330,53 @@ public static class WebServer
             }
             return Results.Text(yaml, "text/yaml; charset=utf-8",
                 Encoding.UTF8);
+        });
+
+        // ── 全自动流水线 (搜索 ➔ 极速测活 ➔ 存活池持久化) ──
+        api.MapPost("/pipeline/start", (PipelineRequest? req) =>
+        {
+            var count = req?.Count ?? state.Settings.RepoCount;
+            var days = req?.Days ?? 7;
+            var conc = req?.Concurrency ?? 6;
+            var skip = req?.SkipSearched ?? false;
+            var hDays = req?.HistoryDays ?? 1;
+            var ok = state.StartAutoPipeline(count, days, conc, skip, hDays, req?.Token);
+            return ok
+                ? Results.Ok(new { started = true })
+                : Results.Conflict(new { error = "已有流水线/搜索/测速正在运行" });
+        });
+
+        api.MapPost("/pipeline/cancel", () =>
+        {
+            state.CancelAutoPipeline();
+            return Results.Ok();
+        });
+
+        // ── 存活池端点 ──
+        api.MapGet("/alive/nodes", (string? country, int? limit) =>
+        {
+            var nodes = AliveNodeStore.GetSummaries(country, limit ?? 500);
+            var stats = AliveNodeStore.GetStats();
+            return Results.Json(new { stats, nodes });
+        });
+
+        api.MapGet("/export/alive", (string? format, string? country, int? minConsecutive) =>
+        {
+            var yaml = AliveNodeStore.ExportClashYaml(minConsecutive, country);
+            if (string.Equals(format, "base64", StringComparison.OrdinalIgnoreCase))
+            {
+                var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(yaml));
+                return Results.Text(b64, "text/plain; charset=utf-8");
+            }
+            return Results.Text(yaml, "text/yaml; charset=utf-8", Encoding.UTF8);
+        });
+
+        api.MapPost("/speedtest/alive", (SpeedRequest? req) =>
+        {
+            var ok = state.StartSpeedTestFromAlivePool(req?.WithHistory ?? false, req?.KeepRounds ?? 3);
+            return ok
+                ? Results.Ok(new { started = true })
+                : Results.Conflict(new { error = "已有测速/流水线在进行，或存活池为空" });
         });
 
         // ── 合并导出 ──
@@ -698,3 +749,6 @@ public sealed record SettingsRequest(
 public sealed record SubUrlEntryInput(string? Name, string? Url);
 
 public sealed record RegexPresetInput(string? Name, string? Pattern);
+
+public sealed record PipelineRequest(
+    int? Count, int? Days, int? Concurrency, bool? SkipSearched, int? HistoryDays, string? Token);

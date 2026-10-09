@@ -2,6 +2,7 @@
 bin/
 obj/
 dist/
+published_app/
 
 # 用户数据
 data/

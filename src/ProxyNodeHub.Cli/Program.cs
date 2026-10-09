@@ -52,6 +52,8 @@ public static class Program
                 "search" => await RunSearchAsync(cts.Token),
                 "merge" => await RunMergeAsync(cts.Token),
                 "speedtest" => await RunSpeedTestAsync(cts.Token),
+                "auto" or "pipeline" => await RunAutoPipelineAsync(cts.Token),
+                "alive" => await RunAliveAsync(cts.Token),
                 "kernel" => await RunKernelAsync(cts.Token),
                 "doctor" => RunDoctor(),
                 _ => UnknownCommand()
@@ -378,31 +380,49 @@ public static class Program
             }
         }
 
-        if (sources.Count == 0)
+        string? customYaml = null;
+        if (_opt.FromAlive)
         {
-            var mergedPath = Path.Combine(_opt.OutputDir, "merged.txt");
-            if (File.Exists(mergedPath))
+            customYaml = AliveNodeStore.ExportClashYaml();
+            if (string.IsNullOrWhiteSpace(customYaml) || customYaml == "proxies: []\n")
             {
-                Console.Error.WriteLine("speedtest 需要订阅来源。");
-                Console.Error.WriteLine("提示: merged.txt 是节点 URI 列表（不是订阅 URL），");
-                Console.Error.WriteLine("      请把上游订阅 URL 作为参数传入，例如：");
-                Console.Error.WriteLine("      pnodes speedtest https://example.com/sub");
+                Console.Error.WriteLine("存活池为空，请先运行 pnodes auto 或在 Web 界面启动自动化流水线。");
+                return 1;
+            }
+            var stats = AliveNodeStore.GetStats();
+            Log($"测速内核: {kernel}");
+            Log($"数据来源: SQLite 存活池（共 {stats.TotalCount} 个存活节点，稳定节点 {stats.StableCount} 个）");
+        }
+        else
+        {
+            if (sources.Count == 0)
+            {
+                var mergedPath = Path.Combine(_opt.OutputDir, "merged.txt");
+                if (File.Exists(mergedPath))
+                {
+                    Console.Error.WriteLine("speedtest 需要订阅来源。");
+                    Console.Error.WriteLine("提示: merged.txt 是节点 URI 列表（不是订阅 URL），");
+                    Console.Error.WriteLine("      请把上游订阅 URL 作为参数传入，例如：");
+                    Console.Error.WriteLine("      pnodes speedtest https://example.com/sub");
+                    return 2;
+                }
+                Console.Error.WriteLine("speedtest 需要至少一个订阅 URL 或含 URL 的文件，或使用 --from-alive 直接测存活池。");
                 return 2;
             }
-            Console.Error.WriteLine("speedtest 需要至少一个订阅 URL 或含 URL 的文件。");
-            return 2;
+
+            Log($"测速内核: {kernel}");
+            Log($"订阅来源: {sources.Count} 个");
         }
 
         SpeedTestConfig.EnsureDirs();
         EnsureDefaultConfig();
 
-        Log($"测速内核: {kernel}");
-        Log($"订阅来源: {sources.Count} 个");
-
         using var runner = new SpeedTestRunner();
         runner.OnLog += line => { if (_opt.Verbose) Log($"  [kernel] {line}"); };
 
-        await runner.PrepareAsync(SubSourceHelper.ToTaggedUrls(sources), withHistory: false, keepRounds: 0);
+        await runner.PrepareAsync(
+            _opt.FromAlive ? new List<string>() : SubSourceHelper.ToTaggedUrls(sources),
+            withHistory: false, keepRounds: 0, nodeUris: null, aliveOnly: false, customYamlBody: customYaml);
         await runner.StartAsync(Log, ct);
         await runner.TriggerAsync(ct);
 
@@ -484,6 +504,7 @@ public static class Program
         if (!string.IsNullOrEmpty(yaml))
         {
             yaml = SpeedTestRunner.FormatPassedYaml(yaml, snap.Nodes);
+            try { AliveNodeStore.SaveRound(yaml, snap.Nodes); } catch { }
             var outPath = Path.Combine(_opt.OutputDir, "passed.yaml");
             Directory.CreateDirectory(_opt.OutputDir);
             AtomicFile.Write(outPath, yaml);
@@ -494,6 +515,168 @@ public static class Program
         runner.SaveRound(snap, yaml);
         await runner.StopAsync();
         return 0;
+    }
+
+    // ══════════════════ auto：全自动化流水线（搜索 ➔ 极速测活 ➔ 存活池入库） ══════════════════
+
+    private static async Task<int> RunAutoPipelineAsync(CancellationToken ct)
+    {
+        Log("══════════════════ 全自动化流水线 ══════════════════");
+        var kernel = SpeedTestConfig.KernelPath;
+        if (!File.Exists(kernel))
+        {
+            Console.Error.WriteLine($"未找到测速内核: {kernel}");
+            return 1;
+        }
+
+        SpeedTestConfig.EnsureDirs();
+        EnsureDefaultConfig();
+
+        var github = new GitHubService(_opt.Token);
+
+        // 阶段 1: 搜索活跃仓库
+        Log("\n[1/3] 搜索 GitHub 活跃仓库并探测订阅…");
+        int lastLogged = 0;
+        var found = await SearchPipeline.RunAsync(github, new SearchPipeline.Options
+        {
+            TargetCount = _opt.Count,
+            SinceDays = _opt.SinceDays,
+            Concurrency = _opt.Concurrency,
+            SkipSearched = _opt.SkipSearched,
+            HistoryDays = _opt.HistoryDays,
+        }, progress =>
+        {
+            if (progress.Phase == "analyze" && progress.Done > lastLogged)
+            {
+                lastLogged = progress.Done;
+                Log($"  [{progress.Done}/{progress.Total}] {progress.Repo?.FullName} · " +
+                    $"评分 {progress.Repo?.Score} · {progress.Repo?.TotalNodes} 节点");
+            }
+        }, log: line => { if (_opt.Verbose) Log(line); }, ct: ct);
+
+        var usable = found
+            .Where(r => r.Links.Any(l => l.IsValid && l.NodeCount > 0))
+            .ToList();
+
+        var speedTestSources = new List<SubSource>();
+        foreach (var r in usable)
+        {
+            foreach (var l in r.Links.Where(l => l.IsValid && l.NodeCount > 0))
+            {
+                speedTestSources.Add(new SubSource { Url = l.Url, Repo = r.FullName });
+            }
+        }
+
+        if (speedTestSources.Count == 0)
+        {
+            Console.Error.WriteLine("未发现有效订阅来源，流水线终止。");
+            return 1;
+        }
+
+        // 阶段 2: 聚合候选节点
+        Log($"\n[2/3] 从 {speedTestSources.Count} 个订阅源提取候选节点…");
+        var entries = await NodeCatalog.LoadAsync(github, speedTestSources,
+            (done, total) => { },
+            log: m => { if (_opt.Verbose) Log(m); },
+            ct: ct,
+            subConverterUrl: _opt.SubConverterUrl
+        );
+
+        if (entries.Count == 0)
+        {
+            Console.Error.WriteLine("未能解析出任何候选节点，流水线终止。");
+            return 1;
+        }
+
+        var candidateUris = entries.Select(e => e.Uri).Where(u => !string.IsNullOrWhiteSpace(u)).Distinct().ToList();
+        Log($"提取完成: {candidateUris.Count} 个去重候选节点");
+
+        // 阶段 3: 极速测活（0 字节探针，并发 50）
+        Log($"\n[3/3] 启动极速测活（并发 50，跳过真实下载与流媒体检测）…");
+        using var runner = new SpeedTestRunner();
+        runner.OnLog += line => { if (_opt.Verbose) Log($"  [kernel] {line}"); };
+
+        await runner.PrepareAsync(new List<string>(), withHistory: false, keepRounds: 0,
+            nodeUris: candidateUris, aliveOnly: true);
+        await runner.StartAsync(Log, ct);
+        await runner.TriggerAsync(ct);
+
+        var deadline = DateTime.UtcNow.AddMinutes(_opt.TimeoutMinutes);
+        bool sawChecking = false;
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            await Task.Delay(2000, ct);
+            var st = await runner.GetStatusAsync(ct);
+            if (st == null) continue;
+            var p = st.Pipeline;
+            int total = p?.Total ?? st.ProxyCount;
+            int alivePass = p?.AlivePass ?? st.Available;
+            Console.Error.Write($"\r  测活进度: 节点 {total} · 存活 {alivePass}    ");
+            if (st.Checking) sawChecking = true;
+            else if (sawChecking) break;
+        }
+        Console.Error.WriteLine();
+
+        var snap = await runner.GetResultsAsync(ct);
+        var kernelYaml = await runner.GetPassedSubscriptionAsync(ct);
+        if (string.IsNullOrWhiteSpace(kernelYaml))
+        {
+            var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+            if (File.Exists(diskPath))
+            {
+                try { kernelYaml = File.ReadAllText(diskPath); } catch { }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(kernelYaml))
+        {
+            var (inserted, updated) = AliveNodeStore.SaveRound(kernelYaml, snap?.Nodes);
+            var stats = AliveNodeStore.GetStats();
+            Log($"\n✓ 存活池已更新并持久化到 SQLite ({AliveNodeStore.DbPath})");
+            Log($"  本轮新增: {inserted} 个 · 更新: {updated} 个 · 存活池总计: {stats.TotalCount} 个（稳定节点 {stats.StableCount} 个）");
+
+            // 同步输出 alive.yaml 到输出目录
+            var aliveYaml = AliveNodeStore.ExportClashYaml();
+            Directory.CreateDirectory(_opt.OutputDir);
+            var outPath = Path.Combine(_opt.OutputDir, "alive.yaml");
+            AtomicFile.Write(outPath, aliveYaml);
+            Log($"  导出 YAML → {outPath}");
+            if (_opt.Stdout) Console.WriteLine(aliveYaml);
+        }
+        else
+        {
+            Console.Error.WriteLine("未发现存活节点。");
+            await runner.StopAsync();
+            return 1;
+        }
+
+        await runner.StopAsync();
+        return 0;
+    }
+
+    // ══════════════════ alive：查看与管理 SQLite 存活池 ══════════════════
+
+    private static Task<int> RunAliveAsync(CancellationToken ct)
+    {
+        var stats = AliveNodeStore.GetStats();
+        Log($"══════════════════ SQLite 存活池状态 ══════════════════");
+        Log($"数据库路径: {AliveNodeStore.DbPath}");
+        Log($"存活节点总数: {stats.TotalCount} 个");
+        Log($"稳定节点(>=2轮): {stats.StableCount} 个");
+        if (stats.LastUpdatedAt.HasValue)
+            Log($"最近更新时间: {stats.LastUpdatedAt.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}");
+
+        Log("\n地区分布:");
+        foreach (var (cc, count) in stats.CountryDistribution)
+            Log($"  {cc}: {count} 个");
+
+        if (_opt.Stdout || _opt.Inputs.Contains("export") || _opt.Inputs.Contains("yaml"))
+        {
+            var yaml = AliveNodeStore.ExportClashYaml();
+            Console.WriteLine(yaml);
+        }
+
+        return Task.FromResult(0);
     }
 
     /// <summary>首次运行时生成内核默认 config.yaml（内容与桌面版一致）。</summary>

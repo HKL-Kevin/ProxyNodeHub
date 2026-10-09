@@ -34,6 +34,9 @@ const state = {
   worldMapSvg: null,
   worldMapCollapsed: localStorage.getItem('worldMapCollapsed') === '1',
   _lastPassedCount: 0,
+  aliveNodes: [],
+  aliveStats: null,
+  pipelineRunning: false,
 };
 
 // ══════════════════ 工具 ══════════════════
@@ -91,6 +94,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     state.view = tab.dataset.view;
     $('view-' + state.view).classList.add('active');
     if (state.view === 'dashboard') renderWorldMap();
+    if (state.view === 'alive') loadAliveNodes();
     if (state.view === 'favorites') loadFavorites();
     if (state.view === 'settings') loadSettings();
   });
@@ -364,6 +368,34 @@ async function pollState() {
       if (s.speedFinishedAt && s.speedFinishedAt !== state._lastSpeedFinish) {
         state._lastSpeedFinish = s.speedFinishedAt;
         loadNodes().then(() => renderWorldMap());
+      }
+    }
+
+    // 存活池与全自动流水线状态
+    const aliveBadge = $('aliveBadge');
+    if (aliveBadge) aliveBadge.textContent = s.aliveCount ?? 0;
+    const aliveTotalChip = $('aliveTotalChip');
+    if (aliveTotalChip) aliveTotalChip.textContent = `${s.aliveCount ?? 0} 个存活`;
+
+    if (s.pipelineRunning !== state.pipelineRunning) {
+      state.pipelineRunning = s.pipelineRunning;
+      const btnStart = $('btnStartPipeline');
+      const btnCancel = $('btnCancelPipeline');
+      if (btnStart) btnStart.disabled = s.pipelineRunning;
+      if (btnCancel) btnCancel.style.display = s.pipelineRunning ? '' : 'none';
+      if (!s.pipelineRunning && state.view === 'alive') {
+        loadAliveNodes();
+      }
+    }
+
+    const pWrap = $('pipelineProgressWrap');
+    if (pWrap) {
+      if (s.pipelineRunning) {
+        pWrap.classList.add('active');
+        $('pipelineProgressBar').style.width = '100%';
+        $('pipelineProgressText').textContent = s.pipelineMessage || '流水线运行中…';
+      } else {
+        pWrap.classList.remove('active');
       }
     }
 
@@ -1392,6 +1424,100 @@ function applyTheme(theme) {
   }
 }
 
+// ══════════════════ 存活池与全自动流水线 ══════════════════
+
+async function loadAliveNodes() {
+  try {
+    const country = $('aliveCountrySel')?.value || '';
+    const res = await api(`/alive/nodes${country ? '?country=' + encodeURIComponent(country) : ''}`);
+    state.aliveNodes = res.nodes || [];
+    state.aliveStats = res.stats || {};
+    renderAliveNodes();
+  } catch (e) {
+    toast('加载存活池失败: ' + e.message, 'error');
+  }
+}
+
+function renderAliveNodes() {
+  const body = $('aliveBody');
+  if (!body) return;
+  const nodes = state.aliveNodes || [];
+  const stats = state.aliveStats || {};
+
+  $('aliveEmpty')?.classList.toggle('show', nodes.length === 0);
+  if ($('aliveTotalChip')) $('aliveTotalChip').textContent = `${stats.totalCount ?? nodes.length} 个存活`;
+  if ($('aliveStableChip')) $('aliveStableChip').textContent = `${stats.stableCount ?? 0} 个稳定`;
+  if ($('aliveBadge')) $('aliveBadge').textContent = stats.totalCount ?? nodes.length;
+
+  const sel = $('aliveCountrySel');
+  if (sel && stats.countries && sel.options.length <= 1) {
+    const curVal = sel.value;
+    sel.innerHTML = '<option value="">全部国家/地区</option>' +
+      stats.countries.map(c => `<option value="${escapeHtml(c.country)}">${escapeHtml(c.country)} (${c.count})</option>`).join('');
+    sel.value = curVal;
+  }
+
+  body.innerHTML = nodes.map(n => `
+    <tr>
+      <td class="col-name" title="${escapeHtml(n.name)}">${escapeHtml(n.name || '—')}</td>
+      <td class="col-proto"><span class="proto-tag ${(n.protocol || '').toLowerCase()}">${escapeHtml(n.protocol || '—')}</span></td>
+      <td class="col-server" title="${escapeHtml(n.server)}:${escapeHtml(n.port)}"><span style="font-family:var(--mono);font-size:11px">${escapeHtml(n.server)}:${escapeHtml(n.port)}</span></td>
+      <td class="col-country">${escapeHtml(n.country || '—')}</td>
+      <td class="col-city">${escapeHtml(n.city || '—')}</td>
+      <td class="num col-speed">${n.latencyMs > 0 ? n.latencyMs + ' ms' : '—'}</td>
+      <td class="col-media">
+        <span class="pill ${n.consecutiveAlive >= 2 ? 'live' : 'stale'}">${n.consecutiveAlive} 轮</span>
+      </td>
+      <td class="col-src">${relTime(n.lastAliveAt)}</td>
+    </tr>
+  `).join('');
+}
+
+async function startPipeline() {
+  if (state.pipelineRunning) return;
+  try {
+    await api('/pipeline/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    toast('全自动流水线已启动', 'success');
+    openLog();
+  } catch (e) {
+    toast('启动流水线失败: ' + e.message, 'error');
+  }
+}
+
+async function cancelPipeline() {
+  try {
+    await api('/pipeline/cancel', { method: 'POST' });
+    toast('已请求取消流水线', 'warn');
+  } catch (e) {
+    toast('取消失败: ' + e.message, 'error');
+  }
+}
+
+async function speedTestAlivePool() {
+  try {
+    await api('/speedtest/alive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ withHistory: false, keepRounds: 3 })
+    });
+    toast('已从存活池启动测速', 'success');
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === 'speedtest'));
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-speedtest'));
+    state.view = 'speedtest';
+    openLog();
+  } catch (e) {
+    toast('启动测速失败: ' + e.message, 'error');
+  }
+}
+
+function exportAlivePool() {
+  window.open('/api/export/alive', '_blank');
+}
+
 // ══════════════════ 快捷键 ══════════════════
 
 document.addEventListener('keydown', (e) => {
@@ -1417,6 +1543,15 @@ document.addEventListener('keydown', (e) => {
   await loadRepos();
   await loadNodes();
   loadWorldMapSvg();   // 异步加载，不阻塞首屏
+
+  $('btnStartPipeline')?.addEventListener('click', startPipeline);
+  $('btnCancelPipeline')?.addEventListener('click', cancelPipeline);
+  $('btnSpeedTestAlive')?.addEventListener('click', speedTestAlivePool);
+  $('btnSpeedTestAliveDirect')?.addEventListener('click', speedTestAlivePool);
+  $('btnExportAlive')?.addEventListener('click', exportAlivePool);
+  $('btnRefreshAlive')?.addEventListener('click', loadAliveNodes);
+  $('aliveCountrySel')?.addEventListener('change', loadAliveNodes);
+
   // 先拉一次设置，把地区预置填进 state.regionPresets，让首屏渲染时 chip 就在
   try {
     const s = await api('/settings');
@@ -1429,6 +1564,9 @@ document.addEventListener('keydown', (e) => {
     if (s.catalogCount > 0 && s.catalogLoadedAt) {
       state.catalogLoaded = true;
       state.catalogLoadedAt = s.catalogLoadedAt;
+    }
+    if (s.aliveCount > 0) {
+      $('aliveBadge').textContent = s.aliveCount;
     }
   } catch {}
   // 把清单 + chip 渲染出来（之前只有切到测速页才触发）

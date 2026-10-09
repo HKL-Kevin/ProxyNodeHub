@@ -36,6 +36,7 @@ public sealed class Options
     public bool Verbose;
     public bool ShowHelp;
     public bool ShowVersion;
+    public bool FromAlive;
 
     /// <summary>Web 服务监听地址。容器里默认 0.0.0.0 才能从宿主访问。</summary>
     public string Bind = "0.0.0.0";
@@ -78,7 +79,7 @@ public sealed class Options
     }
 
     private static readonly string[] Commands =
-        { "web", "search", "merge", "speedtest", "kernel", "doctor" };
+        { "web", "search", "merge", "speedtest", "auto", "pipeline", "alive", "kernel", "doctor" };
 
     public static Options Parse(string[] args)
     {
@@ -112,6 +113,7 @@ public sealed class Options
                 case "--no-merge": o.NoMerge = true; break;
                 case "--skip-searched": o.SkipSearched = true; break;
                 case "--auto-proxy": o.AutoProxy = true; break;
+                case "--from-alive" or "--alive": o.FromAlive = true; break;
 
                 case "-t" or "--token":
                     o.Token = Next(a);
@@ -180,6 +182,8 @@ ProxyNodeHub CLI — GitHub 免费节点仓库搜索、聚合与测速
 
 命令:
   web                        启动 Web 管理界面（浏览器操作，常驻运行）
+  auto                       全自动化流水线（搜索 ➔ 聚合 ➔ 极速测活 ➔ 存活池入库）
+  alive                      查看 SQLite 存活节点池统计与列表
   search                     搜索仓库、分析活跃度、探测订阅链接并合并去重 (默认)
   merge <文件|URL…>          只合并去重已有订阅，不做搜索
   speedtest <URL|文件…>      用 subs-check 内核测速（需已安装内核）
@@ -199,7 +203,11 @@ ProxyNodeHub CLI — GitHub 免费节点仓库搜索、聚合与测速
   -h, --help                 显示帮助
   -V, --version              显示版本
 
-search 专用:
+speedtest 专用:
+      --from-alive           直接从 SQLite 存活池提取节点测速（无需外部订阅）
+      --timeout <分钟>       测速超时（默认 60）
+
+auto / search 专用:
   -n, --count <N>            目标仓库数（默认 30）
   -d, --days <N>             只看最近 N 天更新（默认 7）
   -c, --concurrency <N>      分析并发数（默认 6）
@@ -207,15 +215,15 @@ search 专用:
       --history-days <N>     搜索历史保留天数（默认 1）
       --no-merge             只列链接，不合并去重
 
-speedtest 专用:
-      --timeout <分钟>       测速超时（默认 60）
-
 web 专用:
       --bind <地址>          监听地址（默认 0.0.0.0，容器内必须如此）
       --port <端口>          监听端口（默认 8080）
 
 示例:
   pnodes web --port 8080
+  pnodes auto -n 20 --auto-proxy
+  pnodes alive
+  pnodes speedtest --from-alive
   pnodes search --count 20 --auto-proxy --json
   pnodes search -t ghp_xxx -n 50 -d 14 -v
   pnodes merge /data/output/links.txt https://example.com/sub

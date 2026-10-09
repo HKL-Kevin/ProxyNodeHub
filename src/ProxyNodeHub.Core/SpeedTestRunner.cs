@@ -18,23 +18,23 @@ namespace ProxyNodeHub;
 
 public class SpeedTestStatus
 {
-    public bool Checking;
-    public int ProxyCount;
-    public int Available;
-    public int Progress;
-    public int Phase;
-    public SpeedTestPipeline? Pipeline;
+    public bool Checking { get; set; }
+    public int ProxyCount { get; set; }
+    public int Available { get; set; }
+    public int Progress { get; set; }
+    public int Phase { get; set; }
+    public SpeedTestPipeline? Pipeline { get; set; }
 }
 
 public class SpeedTestPipeline
 {
-    public int Total;
-    public int AliveDone;
-    public int AlivePass;
-    public int MediaDone;
-    public int FilterPass;
-    public int SpeedDone;
-    public int SpeedPass;
+    public int Total { get; set; }
+    public int AliveDone { get; set; }
+    public int AlivePass { get; set; }
+    public int MediaDone { get; set; }
+    public int FilterPass { get; set; }
+    public int SpeedDone { get; set; }
+    public int SpeedPass { get; set; }
 }
 
 public class MediaTag
@@ -263,7 +263,7 @@ public sealed class SpeedTestRunner : IDisposable
     /// 几千个节点每个下载 20MB，耗时不可接受。
     /// </summary>
     public string BuildSessionYaml(List<string> subUrls, bool withHistory, int keepRounds,
-        List<string>? nodeUris = null)
+        List<string>? nodeUris = null, bool aliveOnly = false, string? customYamlBody = null)
     {
         var yaml = SpeedTestConfig.ReadConfig();
         if (string.IsNullOrWhiteSpace(yaml)) yaml = "concurrent: 20\n";
@@ -283,9 +283,25 @@ public sealed class SpeedTestRunner : IDisposable
         // 「获取 mihomo.yaml 失败, 状态码: 500」。
         yaml = SpeedTestConfig.RetargetLocalOverwriteUrl(yaml, Port);
 
+        // 如果开启仅测活模式：关闭流媒体检测，跳过大流量真实测速，提升并发到 50
+        if (aliveOnly)
+        {
+            yaml = SpeedTestConfig.SetScalar(yaml, "media-check", false);
+            yaml = SpeedTestConfig.SetScalar(yaml, "download-mb", 0);
+            yaml = SpeedTestConfig.SetScalar(yaml, "download-timeout", 1);
+            yaml = SpeedTestConfig.SetScalar(yaml, "min-speed", 0);
+            yaml = SpeedTestConfig.SetScalar(yaml, "concurrent", 50);
+        }
+
         var urls = new List<string>();
 
-        if (nodeUris is { Count: > 0 } && _historyServer != null)
+        if (!string.IsNullOrWhiteSpace(customYamlBody) && _historyServer != null)
+        {
+            // 自定义注入模式（如从 SQLite 存活池中读取的原生 Clash YAML）
+            _historyServer.SetBody(customYamlBody);
+            urls.Add($"http://127.0.0.1:{_historyServer.Port}/history.yaml");
+        }
+        else if (nodeUris is { Count: > 0 } && _historyServer != null)
         {
             // 指定节点模式：注入节点 URI 列表。此时不并入历史 ——
             // 用户明确选了要测什么，混入历史快照里的节点会超出他的选择。
@@ -329,10 +345,10 @@ public sealed class SpeedTestRunner : IDisposable
     /// nodeUris 非空时只测这些节点（见 BuildSessionYaml）。
     /// </summary>
     public async Task PrepareAsync(List<string> subUrls, bool withHistory, int keepRounds,
-        List<string>? nodeUris = null)
+        List<string>? nodeUris = null, bool aliveOnly = false, string? customYamlBody = null)
     {
         AllocateOnly();
-        var yaml = BuildSessionYaml(subUrls, withHistory, keepRounds, nodeUris);
+        var yaml = BuildSessionYaml(subUrls, withHistory, keepRounds, nodeUris, aliveOnly, customYamlBody);
         WriteSessionYaml(yaml);
         await Task.CompletedTask;
     }

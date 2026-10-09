@@ -52,6 +52,7 @@
 <!-- ══════════ 页签 ══════════ -->
 <nav class="tabs">
   <button class="tab active" data-view="dashboard">🌍 节点分布</button>
+  <button class="tab" data-view="alive">🟢 存活池 <span class="badge" id="aliveBadge">0</span></button>
   <button class="tab" data-view="search">🔍 搜索分析</button>
   <button class="tab" data-view="favorites">⭐ 收藏夹 <span class="badge" id="favCount">0</span></button>
   <button class="tab" data-view="speedtest">⚡ 节点测速</button>
@@ -75,6 +76,64 @@
         <span><i class="dot residential"></i> 家宽 Residential</span>
         <span><i class="dot datacenter"></i> 机房 Datacenter</span>
       </div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════ 存活池视图 ══════════ -->
+<main class="view" id="view-alive">
+  <section class="toolbar">
+    <button class="btn primary" id="btnStartPipeline">
+      <span class="ico">🤖</span><span id="btnStartPipelineText">一键全自动流水线 (搜索+测活+入库)</span>
+    </button>
+    <button class="btn" id="btnCancelPipeline" style="display:none;color:var(--danger)">
+      <span class="ico">⏹</span><span>取消流水线</span>
+    </button>
+    <button class="btn" id="btnSpeedTestAlive">
+      <span class="ico">⚡</span><span>测速存活池节点</span>
+    </button>
+    <button class="btn" id="btnExportAlive">
+      <span class="ico">↓</span><span>导出存活池 (Clash YAML)</span>
+    </button>
+    <button class="btn" id="btnRefreshAlive">刷新</button>
+    <div class="spacer"></div>
+    <label class="field inline">
+      <span>地区筛选</span>
+      <select id="aliveCountrySel">
+        <option value="">全部国家/地区</option>
+      </select>
+    </label>
+    <span class="count-chip" id="aliveTotalChip">0 个存活</span>
+    <span class="count-chip" id="aliveStableChip">0 个稳定</span>
+  </section>
+
+  <!-- 全自动流水线进度条 -->
+  <div class="progress-wrap" id="pipelineProgressWrap">
+    <div class="progress-bar" id="pipelineProgressBar"></div>
+    <span class="progress-text" id="pipelineProgressText"></span>
+  </div>
+
+  <section class="grid-wrap full" id="aliveWrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th class="col-name">节点名称</th>
+          <th class="col-proto">协议</th>
+          <th class="col-server">服务器</th>
+          <th class="col-country">国家地区</th>
+          <th class="col-city">城市 / 运营商</th>
+          <th class="num col-speed">延迟</th>
+          <th class="col-media">连续存活</th>
+          <th class="col-src">最近存活</th>
+        </tr>
+      </thead>
+      <tbody id="aliveBody"></tbody>
+    </table>
+    <div class="empty" id="aliveEmpty">
+      <p class="empty-title">存活池暂无节点</p>
+      <p>点击上方「一键全自动流水线」，系统将自动完成：<br>
+         <b>GitHub 搜索 ➔ 订阅解析 ➔ 极速测活（0 字节探针）➔ 存活节点 ACID 持久化到 SQLite</b>。<br>
+         后续测速可直接使用存活池节点，秒级启动无需重复拉取分析。</p>
     </div>
   </section>
 </main>
@@ -207,6 +266,9 @@
   <section class="toolbar">
     <button class="btn primary" id="btnLoadCatalog">
       <span class="ico">↓</span><span id="btnLoadText">加载节点清单</span>
+    </button>
+    <button class="btn" id="btnSpeedTestAliveDirect">
+      <span class="ico">🟢</span><span>测速存活池节点</span>
     </button>
     <div class="spacer"></div>
     <label class="field inline checkbox">

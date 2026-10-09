@@ -59,6 +59,12 @@ public sealed class WebState
     public IReadOnlyList<NodeCatalog.NodeEntry> Catalog { get { lock (_gate) return _catalog.ToList(); } }
     public DateTime? CatalogLoadedAt { get; private set; }
 
+    // ── 自动化流水线状态（搜索 ➔ 极速测活 ➔ 存活池入库）──
+    private CancellationTokenSource? _pipelineCts;
+    public bool PipelineRunning { get; private set; }
+    public string PipelinePhase { get; private set; } = "idle";
+    public string PipelineMessage { get; private set; } = "";
+
     // ── 设置 ──
     public AppSettings Settings => AppSettings.Load();
 
@@ -194,6 +200,12 @@ public sealed class WebState
             }
         }
         catch { }
+
+        try
+        {
+            AliveNodeStore.Initialize();
+        }
+        catch { }
     }
 
     private void SaveRepos()
@@ -248,6 +260,9 @@ public sealed class WebState
                 yaml = SpeedTestRunner.FormatPassedYaml(yaml, snap.Nodes);
                 lock (_gate) _lastPassedYaml = yaml;
                 AtomicFile.Write(PassedYamlPath, yaml);
+
+                // 同时持久化至 SQLite 强一致存活池（累加存活轮数、更新健康画像）
+                try { AliveNodeStore.SaveRound(yaml, snap.Nodes); } catch { }
             }
         }
         catch { }
@@ -861,5 +876,290 @@ public sealed class WebState
 
         Log($"去重: 原始 {result.total} 节点 → 唯一 {result.unique} 个", "success");
         return (result.b64, result.plain, result.total, result.unique);
+    }
+
+    // ══════════════════ 全自动化流水线（搜索 ➔ 极速测活 ➔ 存活池入库） ══════════════════
+
+    /// <summary>
+    /// 全自动化流水线：
+    /// 1. 自动搜索活跃仓库并探测订阅链接；
+    /// 2. 自动拉取并合并去重为候选节点；
+    /// 3. 启动轻量内核执行「仅测活」（跳过流媒体与大流量下载测速，仅发 0 字节 204 探针）；
+    /// 4. 将测活通过的节点原子入库到 SQLite 存活池（nodes.db），累加连续存活轮数。
+    /// </summary>
+    public bool StartAutoPipeline(int count, int days, int concurrency, bool skipSearched, int historyDays, string? token)
+    {
+        lock (_gate)
+        {
+            if (PipelineRunning || Searching || SpeedTesting) return false;
+            PipelineRunning = true;
+            PipelinePhase = "searching";
+            PipelineMessage = "正在启动自动化流水线…";
+            _pipelineCts = new CancellationTokenSource();
+        }
+
+        var ct = _pipelineCts!.Token;
+        _ = Task.Run(async () =>
+        {
+            SpeedTestRunner? runner = null;
+            try
+            {
+                Log("══════════════════ [自动化流水线] 启动 ══════════════════", "info");
+                var settings = Settings;
+                var tk = token ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? settings.GetToken();
+                var github = new GitHubService(string.IsNullOrEmpty(tk) ? null : tk);
+
+                // 阶段 1: 搜索仓库
+                lock (_gate)
+                {
+                    PipelinePhase = "searching";
+                    PipelineMessage = "阶段 1/3: 正在搜索 GitHub 仓库与探测订阅…";
+                }
+                Log("[流水线 1/3] 正在搜索 GitHub 仓库…");
+                await EnsureProxyAsync(github, ct);
+
+                var favorites = new HashSet<string>(
+                    FavoritesStore.Load().Select(f => f.FullName), StringComparer.OrdinalIgnoreCase);
+
+                var found = await SearchPipeline.RunAsync(github, new SearchPipeline.Options
+                {
+                    TargetCount = count,
+                    SinceDays = days,
+                    Concurrency = concurrency,
+                    SkipSearched = skipSearched,
+                    HistoryDays = historyDays,
+                    ExcludeRepos = favorites,
+                },
+                progress =>
+                {
+                    lock (_gate)
+                    {
+                        SearchPhase = progress.Phase;
+                        SearchDone = progress.Done;
+                        SearchTotal = progress.Total;
+                        SearchMessage = progress.Message;
+                        PipelineMessage = $"阶段 1/3: [{progress.Phase}] {progress.Message} ({progress.Done}/{progress.Total})";
+                    }
+                },
+                log: line => Log(line),
+                ct: ct);
+
+                var liveRepos = found.Where(r => r.TotalNodes > 0).ToList();
+                lock (_gate) _repos = liveRepos;
+                SaveRepos();
+
+                var speedTestSources = new List<SubSource>();
+                foreach (var r in liveRepos)
+                {
+                    foreach (var l in r.Links.Where(l => l.IsValid && l.NodeCount > 0))
+                    {
+                        speedTestSources.Add(new SubSource { Url = l.Url, Repo = r.FullName });
+                    }
+                }
+
+                if (speedTestSources.Count == 0)
+                {
+                    Log("[流水线] 未发现有效订阅来源，流水线终止", "warn");
+                    return;
+                }
+
+                // 阶段 2: 提取并聚合候选节点
+                lock (_gate)
+                {
+                    PipelinePhase = "aggregating";
+                    PipelineMessage = "阶段 2/3: 正在提取与合并订阅节点…";
+                }
+                Log($"[流水线 2/3] 从 {speedTestSources.Count} 个订阅源提取候选节点…");
+                var candidateEntries = await NodeCatalog.LoadAsync(github, speedTestSources,
+                    (done, total) => { },
+                    log: m => Log(m),
+                    ct: ct,
+                    subConverterUrl: settings.SubConverterUrl
+                );
+
+                if (candidateEntries.Count == 0)
+                {
+                    Log("[流水线] 未能解析出任何候选节点，流水线终止", "warn");
+                    return;
+                }
+
+                lock (_gate)
+                {
+                    _catalog = candidateEntries;
+                    CatalogLoadedAt = DateTime.Now;
+                }
+                SaveCatalog();
+                Log($"[流水线] 聚合完成: 获得 {candidateEntries.Count} 个候选节点", "success");
+
+                // 阶段 3: 极速仅测活 (Alive-Only)
+                lock (_gate)
+                {
+                    PipelinePhase = "alive_testing";
+                    PipelineMessage = $"阶段 3/3: 正在对 {candidateEntries.Count} 个节点执行极速测活（0 字节探针）…";
+                }
+                Log($"[流水线 3/3] 启动极速测活（并发 50，跳过大流量测速与媒体检测）…");
+
+                var candidateUris = candidateEntries.Select(e => e.Uri).Where(u => !string.IsNullOrWhiteSpace(u)).Distinct().ToList();
+
+                var kernel = SpeedTestConfig.KernelPath;
+                if (!File.Exists(kernel))
+                {
+                    Log($"未找到测速内核: {kernel}", "error");
+                    return;
+                }
+
+                SpeedTestConfig.EnsureDirs();
+                if (!File.Exists(SpeedTestConfig.ConfigPath))
+                {
+                    AtomicFile.Write(SpeedTestConfig.ConfigPath, SpeedTestDefaults.DefaultYaml);
+                }
+
+                runner = new SpeedTestRunner();
+                runner.OnLog += line => Log(line, KernelLevel(line));
+
+                // 传入 aliveOnly: true
+                await runner.PrepareAsync(new List<string>(), withHistory: false, keepRounds: 0,
+                    nodeUris: candidateUris, aliveOnly: true);
+                await runner.StartAsync(m => Log(m), ct);
+                await runner.TriggerAsync(ct);
+
+                await PollUntilDoneAsync(runner, ct);
+
+                // 收集结果并入库 SQLite
+                var snap = await runner.GetResultsAsync(CancellationToken.None);
+                var kernelYaml = await runner.GetPassedSubscriptionAsync(CancellationToken.None);
+                if (string.IsNullOrWhiteSpace(kernelYaml))
+                {
+                    var diskPath = Path.Combine(SpeedTestConfig.OutputDir, "all.yaml");
+                    if (File.Exists(diskPath))
+                    {
+                        try { kernelYaml = File.ReadAllText(diskPath); } catch { }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(kernelYaml))
+                {
+                    var (inserted, updated) = AliveNodeStore.SaveRound(kernelYaml, snap?.Nodes);
+                    var stats = AliveNodeStore.GetStats();
+                    Log($"══════════════════ [自动化流水线] 完成 ══════════════════", "success");
+                    Log($"✓ 存活池已更新: 新增 {inserted} 个，更新 {updated} 个 · 当前存活池总计 {stats.TotalCount} 个可用节点", "success");
+                }
+                else
+                {
+                    Log("[流水线] 本轮测活未发现可用存活节点", "warn");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Log("[取消] 自动化流水线已取消", "warn");
+            }
+            catch (Exception ex)
+            {
+                Log($"[流水线失败] {ex.Message}", "error");
+            }
+            finally
+            {
+                if (runner != null)
+                {
+                    try { await runner.StopAsync(); } catch { }
+                    runner.Dispose();
+                }
+                lock (_gate)
+                {
+                    PipelineRunning = false;
+                    PipelinePhase = "idle";
+                    PipelineMessage = "";
+                }
+            }
+        }, ct);
+
+        return true;
+    }
+
+    public void CancelAutoPipeline()
+    {
+        lock (_gate) _pipelineCts?.Cancel();
+    }
+
+    /// <summary>
+    /// 从 SQLite 存活池中读取所有可用节点，直接启动完整测速（测带宽、测流媒体、查 IP）。
+    /// 不再测未经筛选的数千个废节点，测速时间缩短 90% 以上。
+    /// </summary>
+    public bool StartSpeedTestFromAlivePool(bool withHistory, int keepRounds)
+    {
+        var aliveYaml = AliveNodeStore.ExportClashYaml();
+        if (string.IsNullOrWhiteSpace(aliveYaml) || aliveYaml == "proxies: []\n")
+        {
+            Log("存活池为空，请先运行自动化搜索测活流水线生成存活池。", "warn");
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (SpeedTesting || PipelineRunning) return false;
+            SpeedTesting = true;
+            SpeedStatus = null;
+            _speedCts = new CancellationTokenSource();
+        }
+
+        var ct = _speedCts!.Token;
+        _ = Task.Run(async () =>
+        {
+            SpeedTestRunner? runner = null;
+            try
+            {
+                var kernel = SpeedTestConfig.KernelPath;
+                if (!File.Exists(kernel))
+                {
+                    Log($"未找到测速内核: {kernel}", "error");
+                    return;
+                }
+
+                SpeedTestConfig.EnsureDirs();
+                if (!File.Exists(SpeedTestConfig.ConfigPath))
+                {
+                    AtomicFile.Write(SpeedTestConfig.ConfigPath, SpeedTestDefaults.DefaultYaml);
+                }
+
+                var stats = AliveNodeStore.GetStats();
+                Log($"开始对存活池测速 · 输入存活节点 {stats.TotalCount} 个 · " +
+                    $"内核 {SubCheckKernel.Display(SubCheckKernel.LocalVersion())}");
+
+                runner = new SpeedTestRunner();
+                runner.OnLog += line => Log(line, KernelLevel(line));
+
+                // customYamlBody 传入存活池中的 Clash YAML，aliveOnly: false 跑完整测速
+                await runner.PrepareAsync(new List<string>(), withHistory, keepRounds,
+                    nodeUris: null, aliveOnly: false, customYamlBody: aliveYaml);
+                await runner.StartAsync(m => Log(m), ct);
+                await runner.TriggerAsync(ct);
+
+                await PollUntilDoneAsync(runner, ct);
+                await CollectResultsAsync(runner, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                Log("[取消] 测速已取消", "warn");
+            }
+            catch (Exception ex)
+            {
+                Log($"测速失败: {ex.Message}", "error");
+            }
+            finally
+            {
+                if (runner != null)
+                {
+                    try { await runner.StopAsync(); } catch { }
+                    runner.Dispose();
+                }
+                lock (_gate)
+                {
+                    SpeedTesting = false;
+                    SpeedStatus = null;
+                }
+            }
+        }, ct);
+
+        return true;
     }
 }

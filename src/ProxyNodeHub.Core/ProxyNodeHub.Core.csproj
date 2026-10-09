@@ -24,4 +24,8 @@
     <EmbeddedResource Include="..\logo.png" Link="logo.png" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
+  </ItemGroup>
+
 </Project>
