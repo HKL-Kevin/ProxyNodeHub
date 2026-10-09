@@ -1062,6 +1062,44 @@ public sealed class WebState
 
                 if (!string.IsNullOrWhiteSpace(kernelYaml))
                 {
+                    // 批量查询存活节点的出口 IP 详情（城市、ASN、ISP）
+                    if (snap?.Nodes != null)
+                    {
+                        var token = Settings.IpInfoToken;
+                        if (!string.IsNullOrWhiteSpace(token))
+                        {
+                            var ips = snap.Nodes.Where(n => !string.IsNullOrWhiteSpace(n.Ip))
+                                .Select(n => n.Ip!).Distinct().ToList();
+                            if (ips.Count > 0)
+                            {
+                                Log($"[流水线] 批量查询 {ips.Count} 个存活节点的地理位置与城市信息…");
+                                try
+                                {
+                                    var ipInfo = await IpInfoService.LookupAsync(ips, token, m => Log(m), CancellationToken.None);
+                                    foreach (var n in snap.Nodes)
+                                    {
+                                        if (n.Ip != null && ipInfo.TryGetValue(n.Ip, out var info))
+                                        {
+                                            n.IpInfoCity = info.City;
+                                            n.IpInfoRegion = info.Region;
+                                            n.IpInfoOrg = info.Org;
+                                            n.IpInfoAsn = info.Asn;
+                                            n.IpInfoLoc = info.Loc;
+                                            if (string.IsNullOrWhiteSpace(n.Country) && !string.IsNullOrWhiteSpace(info.Country))
+                                            {
+                                                n.Country = info.Country;
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log($"[流水线] IP 地理信息查询异常: {ex.Message}", "warn");
+                                }
+                            }
+                        }
+                    }
+
                     var (inserted, updated) = AliveNodeStore.SaveRound(kernelYaml, snap?.Nodes);
                     var stats = AliveNodeStore.GetStats();
                     Log($"══════════════════ [自动化流水线] 完成 ══════════════════", "success");

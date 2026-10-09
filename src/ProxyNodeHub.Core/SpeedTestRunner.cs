@@ -286,10 +286,10 @@ public sealed class SpeedTestRunner : IDisposable
         // 测活模式 vs 完整测速模式参数配置
         if (aliveOnly)
         {
-            // 纯测活模式：彻底禁用真实测速与流媒体检测，不执行 IP 重命名，仅运行 HTTP 204 探针
+            // 纯测活模式：彻底禁用真实测速与流媒体检测，仅运行 HTTP 204 探针与 IP 探测重命名
             yaml = SpeedTestConfig.SetScalar(yaml, "enable-speedtest", false);
             yaml = SpeedTestConfig.SetScalar(yaml, "media-check", false);
-            yaml = SpeedTestConfig.SetScalar(yaml, "rename-node", false);
+            yaml = SpeedTestConfig.SetScalar(yaml, "rename-node", true);
             yaml = SpeedTestConfig.SetScalar(yaml, "min-speed", 0);
             yaml = SpeedTestConfig.SetScalar(yaml, "concurrent", 50);
             yaml = SpeedTestConfig.SetScalar(yaml, "media-concurrent", 1);

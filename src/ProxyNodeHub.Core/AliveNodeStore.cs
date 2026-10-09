@@ -89,6 +89,7 @@ public static class AliveNodeStore
                 CREATE INDEX IF NOT EXISTS idx_alive_nodes_consecutive ON alive_nodes(consecutive_alive);
             """;
             cmd.ExecuteNonQuery();
+            try { MigrateExistingNodesToFingerprintInternal(conn); } catch { }
             _initialized = true;
         }
     }
@@ -330,6 +331,10 @@ public static class AliveNodeStore
                 country ??= TryExtractCountry(name);
                 city ??= TryExtractCity(name);
 
+                var shortFp = id.Length >= 5 ? id[..5].ToLowerInvariant() : id.ToLowerInvariant();
+                var finalName = BuildStandardNodeName(name, country, city, shortFp);
+                var finalBlock = ReplaceYamlName(block, finalName);
+
                 idParam.Value = id;
                 using var reader = queryCmd.ExecuteReader();
                 if (reader.Read())
@@ -337,14 +342,14 @@ public static class AliveNodeStore
                     reader.Close();
                     // 更新已有节点
                     upId.Value = id;
-                    upName.Value = name;
+                    upName.Value = finalName;
                     upProto.Value = protocol;
                     upServer.Value = server;
                     upPort.Value = port;
                     upCountry.Value = (object?)country ?? DBNull.Value;
                     upCity.Value = (object?)city ?? DBNull.Value;
                     upLatency.Value = latency;
-                    upYaml.Value = block;
+                    upYaml.Value = finalBlock;
                     upLast.Value = nowIso;
                     updateCmd.ExecuteNonQuery();
                     updated++;
@@ -354,14 +359,14 @@ public static class AliveNodeStore
                     reader.Close();
                     // 插入新节点
                     insId.Value = id;
-                    insName.Value = name;
+                    insName.Value = finalName;
                     insProto.Value = protocol;
                     insServer.Value = server;
                     insPort.Value = port;
                     insCountry.Value = (object?)country ?? DBNull.Value;
                     insCity.Value = (object?)city ?? DBNull.Value;
                     insLatency.Value = latency;
-                    insYaml.Value = block;
+                    insYaml.Value = finalBlock;
                     insFirst.Value = nowIso;
                     insLast.Value = nowIso;
                     insertCmd.ExecuteNonQuery();
@@ -538,6 +543,30 @@ public static class AliveNodeStore
         }
     }
 
+    private static readonly Dictionary<string, string> _cnCountryMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["香港"] = "HK", ["台湾"] = "TW", ["日本"] = "JP", ["新加坡"] = "SG",
+        ["美国"] = "US", ["韩国"] = "KR", ["德国"] = "DE", ["英国"] = "GB",
+        ["法国"] = "FR", ["俄罗斯"] = "RU", ["加拿大"] = "CA", ["澳大利亚"] = "AU",
+        ["爱尔兰"] = "IE", ["波兰"] = "PL", ["土耳其"] = "TR", ["荷兰"] = "NL",
+        ["印度"] = "IN", ["印尼"] = "ID", ["泰国"] = "TH", ["马来西亚"] = "MY",
+        ["菲律宾"] = "PH", ["越南"] = "VN", ["阿根廷"] = "AR", ["巴西"] = "BR",
+        ["瑞士"] = "CH", ["瑞典"] = "SE", ["挪威"] = "NO", ["芬兰"] = "FI",
+        ["意大利"] = "IT", ["西班牙"] = "ES", ["葡萄牙"] = "PT", ["希腊"] = "GR"
+    };
+
+    public static string CountryCodeToFlag(string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code) || code.Length != 2) return "";
+        var c1 = char.ToUpperInvariant(code[0]);
+        var c2 = char.ToUpperInvariant(code[1]);
+        if (c1 >= 'A' && c1 <= 'Z' && c2 >= 'A' && c2 <= 'Z')
+        {
+            return $"{char.ConvertFromUtf32(0x1F1E6 + (c1 - 'A'))}{char.ConvertFromUtf32(0x1F1E6 + (c2 - 'A'))}";
+        }
+        return "";
+    }
+
     public static string? TryExtractCountry(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
@@ -555,6 +584,12 @@ public static class AliveNodeStore
         {
             return $"{(char)(cps[0] - 0x1F1E6 + 'A')}{(char)(cps[1] - 0x1F1E6 + 'A')}";
         }
+
+        foreach (var (cn, code) in _cnCountryMap)
+        {
+            if (name.Contains(cn, StringComparison.OrdinalIgnoreCase)) return code;
+        }
+
         var parts = name.Split('_');
         if (parts.Length > 0)
         {
@@ -568,11 +603,162 @@ public static class AliveNodeStore
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
         var parts = name.Split('_');
-        if (parts.Length >= 3 && !int.TryParse(parts[1], out _))
+        if (parts.Length >= 3 && !int.TryParse(parts[1], out _) && !Regex.IsMatch(parts[1], @"^[0-9a-fA-F]{5}$"))
         {
-            return parts[1].Trim();
+            var c = parts[1].Trim();
+            if (c.Length > 0 && c != "—" && c != "-") return c;
         }
         return null;
+    }
+
+    /// <summary>
+    /// 标准化生成节点名称：移除原有的 _序号 / -序号，强制以 5 位主键哈希指纹（_{key[..5]}）作为唯一后缀避免碰撞。
+    /// 格式：[国旗代码]_[城市]_[5位指纹] 或 [国旗代码]_[5位指纹] 或 [清洗原名]_[5位指纹]。
+    /// </summary>
+    public static string BuildStandardNodeName(string currentName, string? country, string? city, string fingerprintKey)
+    {
+        var shortFp = fingerprintKey.Length >= 5 ? fingerprintKey[..5].ToLowerInvariant() : fingerprintKey.ToLowerInvariant();
+        var cleanCity = !string.IsNullOrWhiteSpace(city) && city != "—" && city != "-" && !city.Equals("null", StringComparison.OrdinalIgnoreCase)
+            ? city.Trim().Trim('"', '\'')
+            : null;
+
+        var decoded = SpeedTestRunner.DecodeUnicode(currentName);
+        var pipe = decoded.IndexOf('|');
+        var core = pipe > 0 ? decoded[..pipe].Trim() : decoded.Trim();
+
+        // 去除开头的延迟信息，如 [483.2ms +/-451ms] 或 [511.6ms]
+        core = Regex.Replace(core, @"^\[[0-9.]+\s*ms[^\]]*\]\s*", "").Trim();
+
+        // 剔除末尾原有的数字序号（如 _1, _14, -14）或已有的 5 位 hex 指纹
+        core = Regex.Replace(core, @"(?:[_-]\d{1,4}|_[0-9a-fA-F]{5})$", "").Trim();
+
+        if (!string.IsNullOrWhiteSpace(country) && country.Length == 2)
+        {
+            var code = country.ToUpperInvariant();
+            var flag = CountryCodeToFlag(code);
+            var prefix = $"{flag}{code}";
+
+            if (core.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                core.StartsWith($"{flag} {code}", StringComparison.OrdinalIgnoreCase))
+            {
+                // 规范化头部为 🇺🇸US 紧凑格式
+                if (core.StartsWith($"{flag} {code}", StringComparison.OrdinalIgnoreCase))
+                {
+                    core = $"{prefix}{core[($"{flag} {code}").Length..]}";
+                }
+
+                if (cleanCity != null)
+                {
+                    if (core.Contains($"_{cleanCity}", StringComparison.OrdinalIgnoreCase) ||
+                        core.Contains($"-{cleanCity}", StringComparison.OrdinalIgnoreCase))
+                    {
+                        core = core.Replace($"-{cleanCity}", $"_{cleanCity}");
+                    }
+                    else
+                    {
+                        core = $"{core}_{cleanCity}";
+                    }
+                }
+            }
+            else
+            {
+                // 原名不符合标准国名前缀，使用反查出的国家与城市重新组装
+                core = cleanCity != null ? $"{prefix}_{cleanCity}" : prefix;
+            }
+        }
+        else
+        {
+            if (cleanCity != null && !core.Contains(cleanCity, StringComparison.OrdinalIgnoreCase))
+            {
+                core = $"{core}_{cleanCity}";
+            }
+        }
+
+        // 以 5 位指纹作为后缀避免碰撞
+        return $"{core}_{shortFp}";
+    }
+
+    /// <summary>
+    /// 无损替换 Clash YAML 代理块中的 name 属性。
+    /// </summary>
+    public static string ReplaceYamlName(string block, string newName)
+    {
+        if (string.IsNullOrWhiteSpace(block)) return block;
+
+        var multilineRegex = new Regex(@"^(?<indent>\s*(?:-\s+)?name\s*:\s*)(?:[""']?[^""'\r\n]+[""']?)", RegexOptions.Multiline);
+        if (multilineRegex.IsMatch(block))
+        {
+            return multilineRegex.Replace(block, m => $"{m.Groups["indent"].Value}\"{newName}\"", 1);
+        }
+
+        var inlineRegex = new Regex(@"(?<prefix>(?:\{|,)\s*name\s*:\s*)(?:[""']?[^""',}\r\n]+[""']?)");
+        if (inlineRegex.IsMatch(block))
+        {
+            return inlineRegex.Replace(block, m => $"{m.Groups["prefix"].Value}\"{newName}\"", 1);
+        }
+
+        return block;
+    }
+
+    private static int MigrateExistingNodesToFingerprintInternal(SqliteConnection conn)
+    {
+        var rows = new List<(string id, string name, string protocol, string server, int port, string? country, string? city, string rawYaml)>();
+        using (var selCmd = conn.CreateCommand())
+        {
+            selCmd.CommandText = "SELECT id, name, protocol, server, port, country, city, raw_yaml FROM alive_nodes";
+            using var reader = selCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                rows.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.GetString(7)
+                ));
+            }
+        }
+
+        int changed = 0;
+        using var upCmd = conn.CreateCommand();
+        upCmd.CommandText = "UPDATE alive_nodes SET name = @name, country = @country, city = @city, raw_yaml = @raw_yaml WHERE id = @id";
+        var pName = upCmd.Parameters.Add("@name", SqliteType.Text);
+        var pCountry = upCmd.Parameters.Add("@country", SqliteType.Text);
+        var pCity = upCmd.Parameters.Add("@city", SqliteType.Text);
+        var pYaml = upCmd.Parameters.Add("@raw_yaml", SqliteType.Text);
+        var pId = upCmd.Parameters.Add("@id", SqliteType.Text);
+
+        foreach (var r in rows)
+        {
+            var country = r.country ?? TryExtractCountry(r.name);
+            var city = r.city ?? TryExtractCity(r.name);
+
+            if (string.IsNullOrWhiteSpace(city))
+            {
+                var cachedIp = IpInfoService.GetCached(r.server);
+                city ??= cachedIp?.City;
+                country ??= cachedIp?.Country;
+            }
+
+            var shortFp = r.id.Length >= 5 ? r.id[..5].ToLowerInvariant() : r.id.ToLowerInvariant();
+            var finalName = BuildStandardNodeName(r.name, country, city, shortFp);
+            var finalYaml = ReplaceYamlName(r.rawYaml, finalName);
+
+            if (finalName != r.name || finalYaml != r.rawYaml || country != r.country || city != r.city)
+            {
+                pId.Value = r.id;
+                pName.Value = finalName;
+                pCountry.Value = (object?)country ?? DBNull.Value;
+                pCity.Value = (object?)city ?? DBNull.Value;
+                pYaml.Value = finalYaml;
+                upCmd.ExecuteNonQuery();
+                changed++;
+            }
+        }
+        return changed;
     }
 
     private static string? ExtractField(string block, string key)
