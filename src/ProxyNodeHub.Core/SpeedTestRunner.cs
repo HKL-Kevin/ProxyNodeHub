@@ -283,14 +283,22 @@ public sealed class SpeedTestRunner : IDisposable
         // 「获取 mihomo.yaml 失败, 状态码: 500」。
         yaml = SpeedTestConfig.RetargetLocalOverwriteUrl(yaml, Port);
 
-        // 如果开启仅测活模式：关闭流媒体检测，跳过大流量真实测速，提升并发到 50
+        // 测活模式 vs 完整测速模式参数配置
         if (aliveOnly)
         {
+            // 纯测活模式：彻底禁用真实测速与流媒体检测，不执行 IP 重命名，仅运行 HTTP 204 探针
+            yaml = SpeedTestConfig.SetScalar(yaml, "enable-speedtest", false);
             yaml = SpeedTestConfig.SetScalar(yaml, "media-check", false);
-            yaml = SpeedTestConfig.SetScalar(yaml, "download-mb", 0);
-            yaml = SpeedTestConfig.SetScalar(yaml, "download-timeout", 1);
+            yaml = SpeedTestConfig.SetScalar(yaml, "rename-node", false);
             yaml = SpeedTestConfig.SetScalar(yaml, "min-speed", 0);
             yaml = SpeedTestConfig.SetScalar(yaml, "concurrent", 50);
+            yaml = SpeedTestConfig.SetScalar(yaml, "media-concurrent", 1);
+            yaml = SpeedTestConfig.SetScalar(yaml, "speed-concurrent", 1);
+            yaml = SpeedTestConfig.SetScalar(yaml, "timeout", 2000);
+        }
+        else
+        {
+            yaml = SpeedTestConfig.SetScalar(yaml, "enable-speedtest", true);
         }
 
         var urls = new List<string>();
