@@ -50,16 +50,18 @@ adb -s 192.168.2.237:5555 shell "su -c '/data/data/com.termux/files/usr/bin/dock
 
 这是小米 6 Docker 与常规 Docker 最大的区别点，90% 的启动报错与运行异常源于此。
 
-### 1. 挂载点文件系统属性：严禁挂载 `/sdcard`
-* **底层机制**：Android 的内部存储路径（`/sdcard`、`/storage/emulated/0`）是通过 FUSE 或 `sdcardfs` 模拟的虚拟文件系统，**不具备标准的 POSIX 权限、所有权管理（chmod/chown 无效）以及软硬链接支持**。
-* **致命后果**：
-  * 若将 `/sdcard` 挂载为数据库目录（如 SQLite、MySQL、PostgreSQL），会因缺少文件锁或不支持 WAL 机制直接报错崩溃。
-  * 任何要求执行权限（`+x`）的可执行文件或二进制包挂载至 `/sdcard` 后均无法执行。
-* **铁律**：
-  * **所有持久化数据卷必须位于 Android 真正的 ext4/f2fs 分区**，例如：
-    * `/data/docker/...`
-    * `/data/data/com.termux/files/home/...`
-    * 严禁将数据卷挂载至 `/sdcard/` 或 `/storage/emulated/` 下！
+### 1. 挂载点文件系统三级划分与绝对禁区
+Android 的存储体系与通用 Linux 完全不同，盲目挂载会导致数据损坏或完全无法读取：
+
+* ❌ **禁区一：严禁挂载 `/sdcard` / `/storage/emulated/0`（FUSE/sdcardfs 模拟层）**
+  * **底层缺陷**：属于虚拟文件系统，**不具备 POSIX 权限（chmod/chown 无效），不支持软硬链接和 UNIX Socket**。
+  * **致命后果**：数据库（SQLite WAL 模式、MySQL、Redis）因缺少标准文件锁和 mmap 支持直接报错崩溃；可执行文件无法赋予 `+x` 执行权限。
+* ❌ **禁区二：严禁挂载 Termux 私有目录 `/data/data/com.termux/...`（Android FBE 凭据加密陷阱）**
+  * **底层缺陷**：Android 启用基于文件的加密（FBE, File-Based Encryption），Termux 私有数据位于 **CE（Credential Encrypted，凭据加密）** 存储区，受用户锁屏密码密钥环和 Android `app_data_file` 沙箱保护。
+  * **致命后果**：Docker 容器处于独立的挂载命名空间（Mount Namespace），无法解密 CE 存储。挂载后容器内部表现为**读取目录为空、文件名显示为加密密文散列乱码，或直接报错 `Required key not available` / `Input/output error`**。设备锁屏后挂载更会直接失效。
+* ✅ **唯一正解：系统 Root 级原生 ext4/f2fs 分区（`/data/docker/...`）**
+  * **标准规范**：统一在 `/data/docker/` 目录下规划（例如 `/data/docker/volumes/<容器名>/`）。
+  * **核心优势**：直接位于系统 ext4/f2fs 分区根下，**不受 Android App FBE 凭据加密限制**，具备纯正 POSIX 权限、支持标准文件锁、UNIX 套接字与软硬链接。
 
 ### 2. 绝对路径强制
 * 在 ADB `su -c` 下执行时，当前工作目录通常被重置为 `/` 或 Termux 主目录。

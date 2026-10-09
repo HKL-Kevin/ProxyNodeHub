@@ -15,12 +15,30 @@
   * **不支持 UNIX Socket**：无法在这些路径下创建 `.sock` 文件（如 Docker、Redis、MySQL 所需的套接字）。
   * **不支持硬链接 (Hardlinks)**：Git 仓库或构建缓存操作会直接报错 `Operation not permitted`。
   * **缺少标准文件锁与 mmap 异常**：数据库（SQLite WAL 模式、RocksDB、LevelDB、MySQL）在此路径下会出现严重的数据损坏或启动失败。
-* **规则**：**绝不可将容器的任何工作目录、数据库目录挂载到 `/sdcard` 或其子目录下！**
+* **铁律**：**绝不可将容器的任何工作目录、数据库目录挂载到 `/sdcard` 或其子目录下！**
 
-### (2) 真正的 Linux 原生分区 (`/data/` 根目录下的自建目录)
-* **路径示例**：`/data/docker/...`，`/data/data/com.termux/files/...`。
-* **特点**：直接基于设备的 `ext4` 或 `f2fs` 文件系统，具备完整 POSIX 特性，支持软硬链接、所有权隔离、文件锁与可执行标志。
-* **规则**：**所有 Docker Volume、数据卷持久化目录一律规划在 `/data/` 或 Termux 私有目录下。**
+### (2) Termux 应用私有目录 (`/data/data/com.termux/...`) 的 FBE 加密陷阱
+* **底层机制**：
+  * Android 7.0+ 全面采用**基于文件的加密（FBE, File-Based Encryption）**。
+  * Android 存储划分为两类：**设备加密（DE, Device Encrypted）** 与 **凭据加密（CE, Credential Encrypted）**。
+  * Termux 的整个私有目录（`/data/data/com.termux/`，即 `/data/user/0/com.termux/`）严格属于 **CE 凭据加密存储**。
+  * CE 密钥直接绑定在用户的 Android 锁屏密码（PIN/图案）Keyring 上。此外，该目录还受 Android `app_data_file` 的 SELinux 强制沙箱策略保护。
+* **致命后果**：
+  * Docker 守护进程与容器运行在独立的 Linux Mount Namespace 中，无法持有和继承 Android 用户会话的凭据解密密钥上下文。
+  * 若将 Termux 私有目录挂载进 Docker 容器，容器内部往往：
+    1. **读取目录为空**：目录存在但 `ls` 没有任何文件；
+    2. **乱码加密哈希**：读出的文件名全是未解密的随机密文哈希串；
+    3. **I/O 与密钥失效报错**：直接抛出 `Input/output error` (EIO) 或 `Required key not available` (ENOKEY)；
+    4. **锁屏断流**：一旦手机锁屏或休眠，CE 密钥立即锁定卸载，容器工作中断。
+* **铁律**：**严禁将 Termux 私有目录（`/data/data/com.termux/...`）挂载为容器的数据卷！**
+
+### (3) 真正的 Linux 原生系统根级分区 (`/data/docker/...`) —— 唯一正解
+* **标准路径**：统一在 `/data/docker/`（例如 `/data/docker/volumes/<容器名>`）由 Root 用户自建。
+* **底层机制**：
+  * 直接位于设备底层真实的 `ext4` 或 `f2fs` 文件系统根路径上。
+  * **彻底避开 Android 应用层的 CE 凭据加密与 `app_data_file` SELinux 沙箱**，属于全局 Native 存储。
+  * 拥有纯正的 Linux POSIX 完整特性：支持真实 UID/GID 所有权、`chmod`/`chown` 权限、软硬链接、UNIX Socket 以及完整的数据库文件锁与 mmap 机制。
+* **规则**：**所有 Docker Volume、数据持久化卷一律在 `/data/docker/` 下规范规划！**
 
 ---
 
