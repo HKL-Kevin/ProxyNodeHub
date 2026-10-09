@@ -25,6 +25,20 @@ public sealed class WebState
 {
     private readonly object _gate = new();
 
+    public WebState()
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(2000);
+            try
+            {
+                var token = Settings.IpInfoToken;
+                await AliveNodeStore.EnrichMissingGeoInfoAsync(token, m => Log(m));
+            }
+            catch { }
+        });
+    }
+
     // ── 仓库 ──
     private List<RepoInfo> _repos = new();
     public IReadOnlyList<RepoInfo> Repos { get { lock (_gate) return _repos.ToList(); } }

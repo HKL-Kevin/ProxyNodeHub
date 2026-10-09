@@ -371,6 +371,12 @@ public static class WebServer
             return Results.Text(yaml, "text/yaml; charset=utf-8", Encoding.UTF8);
         });
 
+        api.MapPost("/alive/enrich", async () =>
+        {
+            var count = await AliveNodeStore.EnrichMissingGeoInfoAsync(state.Settings.IpInfoToken, m => state.Log(m));
+            return Results.Json(new { enriched = count });
+        });
+
         api.MapPost("/speedtest/alive", (SpeedRequest? req) =>
         {
             var ok = state.StartSpeedTestFromAlivePool(req?.WithHistory ?? false, req?.KeepRounds ?? 3);

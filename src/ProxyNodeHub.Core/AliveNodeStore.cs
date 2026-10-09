@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 
 namespace ProxyNodeHub;
@@ -759,6 +763,102 @@ public static class AliveNodeStore
             }
         }
         return changed;
+    }
+
+    /// <summary>
+    /// 异步主动补全存活池中因历史原因（如关闭了 IP 探测）缺失地区或城市的节点。
+    /// 自动将域名 server 解析为公网 IP 并批量调用 ipinfo.io 查询，更新节点标准名称与地理信息。
+    /// </summary>
+    public static async Task<int> EnrichMissingGeoInfoAsync(string? token, Action<string>? log = null)
+    {
+        Initialize();
+        var targets = new List<(string id, string name, string server, int port, string rawYaml)>();
+        lock (_lock)
+        {
+            using var conn = new SqliteConnection(ConnectionString);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT id, name, server, port, raw_yaml FROM alive_nodes WHERE country IS NULL OR city IS NULL";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                targets.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3), reader.GetString(4)));
+            }
+        }
+
+        if (targets.Count == 0) return 0;
+        log?.Invoke($"发现 {targets.Count} 个存活节点缺少地区/城市，正在尝试补全…");
+
+        // 收集待查 IP（域名自动 DNS 解析）
+        var hostToIp = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in targets)
+        {
+            if (IPAddress.TryParse(t.server, out _))
+            {
+                hostToIp[t.server] = t.server;
+            }
+            else
+            {
+                try
+                {
+                    var addrs = await Dns.GetHostAddressesAsync(t.server);
+                    var ip = addrs.FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)?.ToString()
+                             ?? addrs.FirstOrDefault()?.ToString();
+                    if (!string.IsNullOrWhiteSpace(ip))
+                    {
+                        hostToIp[t.server] = ip;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        var ipsToLookup = hostToIp.Values.Distinct().ToList();
+        if (ipsToLookup.Count == 0) return 0;
+
+        var ipInfoMap = await IpInfoService.LookupAsync(ipsToLookup, token, log, CancellationToken.None);
+        if (ipInfoMap.Count == 0) return 0;
+
+        int updated = 0;
+        lock (_lock)
+        {
+            using var conn = new SqliteConnection(ConnectionString);
+            conn.Open();
+            using var upCmd = conn.CreateCommand();
+            upCmd.CommandText = "UPDATE alive_nodes SET name = @name, country = @country, city = @city, raw_yaml = @raw_yaml WHERE id = @id";
+            var pName = upCmd.Parameters.Add("@name", SqliteType.Text);
+            var pCountry = upCmd.Parameters.Add("@country", SqliteType.Text);
+            var pCity = upCmd.Parameters.Add("@city", SqliteType.Text);
+            var pYaml = upCmd.Parameters.Add("@raw_yaml", SqliteType.Text);
+            var pId = upCmd.Parameters.Add("@id", SqliteType.Text);
+
+            foreach (var t in targets)
+            {
+                if (!hostToIp.TryGetValue(t.server, out var ip) || !ipInfoMap.TryGetValue(ip, out var info))
+                    continue;
+
+                var country = !string.IsNullOrWhiteSpace(info.Country) ? info.Country : TryExtractCountry(t.name);
+                var city = !string.IsNullOrWhiteSpace(info.City) ? info.City : TryExtractCity(t.name);
+
+                var shortFp = t.id.Length >= 5 ? t.id[..5].ToLowerInvariant() : t.id.ToLowerInvariant();
+                var finalName = BuildStandardNodeName(t.name, country, city, shortFp);
+                var finalYaml = ReplaceYamlName(t.rawYaml, finalName);
+
+                pId.Value = t.id;
+                pName.Value = finalName;
+                pCountry.Value = (object?)country ?? DBNull.Value;
+                pCity.Value = (object?)city ?? DBNull.Value;
+                pYaml.Value = finalYaml;
+                upCmd.ExecuteNonQuery();
+                updated++;
+            }
+        }
+
+        if (updated > 0)
+        {
+            log?.Invoke($"已成功补全 {updated} 个节点的地区与城市信息。");
+        }
+        return updated;
     }
 
     private static string? ExtractField(string block, string key)
