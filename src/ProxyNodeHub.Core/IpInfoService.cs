@@ -44,6 +44,13 @@ public static class IpInfoService
         catch { }
     }
 
+    /// <summary>从内存缓存中获取指定 IP 的信息，不存在或入参为空则返回 null。</summary>
+    public static IpInfo? GetCached(string? ip)
+    {
+        if (string.IsNullOrWhiteSpace(ip)) return null;
+        return _cache.TryGetValue(ip, out var info) ? info : null;
+    }
+
     /// <summary>把缓存落盘（原子写）。</summary>
     public static void SaveCache()
     {

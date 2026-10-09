@@ -454,6 +454,7 @@ public static class Program
             var partial = await runner.GetPassedSubscriptionAsync(ct);
             if (!string.IsNullOrWhiteSpace(partial))
             {
+                partial = SpeedTestRunner.FormatPassedYaml(partial);
                 Directory.CreateDirectory(_opt.OutputDir);
                 var partialPath = Path.Combine(_opt.OutputDir, "passed.yaml");
                 AtomicFile.Write(partialPath, partial);
@@ -482,6 +483,7 @@ public static class Program
         }
         if (!string.IsNullOrEmpty(yaml))
         {
+            yaml = SpeedTestRunner.FormatPassedYaml(yaml, snap.Nodes);
             var outPath = Path.Combine(_opt.OutputDir, "passed.yaml");
             Directory.CreateDirectory(_opt.OutputDir);
             AtomicFile.Write(outPath, yaml);

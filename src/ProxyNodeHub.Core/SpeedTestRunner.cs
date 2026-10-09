@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -117,26 +118,13 @@ public class SpeedTestNode
     }
 
     /// <summary>
-    /// 统一的展示用节点名：截断内核拼接的 | 后缀 + 插入 ipinfo.io 查到的城市。
+    /// 统一的展示用节点名：(国旗地区_城市_N) 形式，截断速率与丢包标签。
     ///
     /// 内核 rename-node 只拼国家码（🇺🇸US_1），不拼城市。城市来自 ipinfo.io
-    /// 的 IpInfoCity 字段，插在国家码与序号之间：🇺🇸US_1 → 🇺🇸US-Kansas City_1。
+    /// 的 IpInfoCity 字段，插在国家码与序号之间：🇺🇸US_1 → 🇺🇸US_Kansas City_1。
     /// Name/BaseName 保持内核原值不动，DisplayName 只读不写。
     /// </summary>
-    public string DisplayName
-    {
-        get
-        {
-            var raw = !string.IsNullOrWhiteSpace(Name) ? Name
-                    : !string.IsNullOrWhiteSpace(BaseName) ? BaseName
-                    : Server;
-            var pipe = raw.IndexOf('|');
-            var core = pipe > 0 ? raw[..pipe] : raw;
-            if (string.IsNullOrWhiteSpace(IpInfoCity)) return core;
-            var us = core.IndexOf('_');
-            return us <= 0 ? core : core[..us] + "-" + IpInfoCity + core[us..];
-        }
-    }
+    public string DisplayName => SpeedTestRunner.FormatNodeName(Name, IpInfoCity, BaseName, Server);
 }
 
 public class SpeedTestSnapshot
@@ -562,6 +550,7 @@ public sealed class SpeedTestRunner : IDisposable
                 }
             }
             if (string.IsNullOrWhiteSpace(yaml)) return;
+            yaml = FormatPassedYaml(yaml, snap.Nodes);
 
             Directory.CreateDirectory(SpeedTestConfig.HistoryDir);
             // 文件名必须带毫秒：两轮测速间隔可能不足一秒，只到秒会互相覆盖。
@@ -717,6 +706,222 @@ public sealed class SpeedTestRunner : IDisposable
         else while (end < line.Length && line[end] != ',' && line[end] != '}') end++;
         var v = line[i..end].Trim();
         return v.Length == 0 ? null : v;
+    }
+
+    /// <summary>
+    /// 统一格式化单个节点名称：(国旗地区_城市_N) 形式，截断速率与丢包标签。
+    /// </summary>
+    public static string FormatNodeName(string? name, string? city, string? baseName = null, string? server = null)
+    {
+        var raw = !string.IsNullOrWhiteSpace(name) ? name
+                : !string.IsNullOrWhiteSpace(baseName) ? baseName
+                : server ?? "";
+        if (string.IsNullOrWhiteSpace(raw)) return raw;
+
+        // 1. 解码 Unicode 转义序列，如 \U0001F1E9\U0001F1EA -> 🇩🇪
+        var decoded = DecodeUnicode(raw);
+
+        // 2. 截断速率与丢包标签：从第一个 '|' 处截断
+        var pipe = decoded.IndexOf('|');
+        var core = pipe > 0 ? decoded[..pipe].Trim() : decoded.Trim();
+
+        if (string.IsNullOrWhiteSpace(city)) return core;
+
+        var cleanCity = city.Trim().Trim('"', '\'');
+        if (string.IsNullOrWhiteSpace(cleanCity)) return core;
+
+        // 如果已有旧格式 国旗-城市_序号，替换连字符为下划线
+        core = core.Replace($"-{cleanCity}_", $"_{cleanCity}_");
+
+        // 避免重复插入相同城市名
+        if (core.Contains($"_{cleanCity}_", StringComparison.OrdinalIgnoreCase) ||
+            core.EndsWith($"_{cleanCity}", StringComparison.OrdinalIgnoreCase))
+        {
+            return core;
+        }
+
+        var us = core.IndexOf('_');
+        if (us > 0)
+        {
+            return $"{core[..us]}_{cleanCity}{core[us..]}";
+        }
+
+        var hyphen = core.IndexOf('-');
+        if (hyphen > 0)
+        {
+            return $"{core[..hyphen]}_{cleanCity}_{core[(hyphen + 1)..]}";
+        }
+
+        return $"{core}_{cleanCity}";
+    }
+
+    /// <summary>解码 \U0001F1E9 和 \u0000 形式的 Unicode 转义。</summary>
+    public static string DecodeUnicode(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        if (!text.Contains("\\U") && !text.Contains("\\u")) return text;
+        try
+        {
+            var res = Regex.Replace(text, @"\\U([0-9a-fA-F]{8})", m =>
+            {
+                try
+                {
+                    var cp = Convert.ToInt32(m.Groups[1].Value, 16);
+                    return char.ConvertFromUtf32(cp);
+                }
+                catch { return m.Value; }
+            });
+            res = Regex.Replace(res, @"\\u([0-9a-fA-F]{4})", m =>
+            {
+                try
+                {
+                    var cp = Convert.ToInt32(m.Groups[1].Value, 16);
+                    return ((char)cp).ToString();
+                }
+                catch { return m.Value; }
+            });
+            return res;
+        }
+        catch { return text; }
+    }
+
+    /// <summary>
+    /// 重写 Clash YAML 中的节点名，去除速率并插入城市：(国旗地区_城市_N)。
+    /// 保证完整凭据（uuid/password等）不丢失，同时确保节点名唯一性。
+    /// </summary>
+    public static string FormatPassedYaml(string yaml, IEnumerable<SpeedTestNode>? nodes = null)
+    {
+        if (string.IsNullOrWhiteSpace(yaml)) return yaml;
+
+        var cityByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var cityByServer = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (nodes != null)
+        {
+            foreach (var n in nodes)
+            {
+                if (string.IsNullOrWhiteSpace(n.IpInfoCity)) continue;
+                var city = n.IpInfoCity.Trim();
+                if (!string.IsNullOrWhiteSpace(n.Name))
+                {
+                    cityByName[n.Name] = city;
+                    var dec = DecodeUnicode(n.Name);
+                    cityByName[dec] = city;
+                    var pipe = dec.IndexOf('|');
+                    if (pipe > 0) cityByName[dec[..pipe].Trim()] = city;
+                }
+                if (!string.IsNullOrWhiteSpace(n.Server))
+                {
+                    cityByServer[n.Server.Trim()] = city;
+                    if (!string.IsNullOrWhiteSpace(n.Port)) cityByServer[$"{n.Server.Trim()}:{n.Port.Trim()}"] = city;
+                }
+            }
+        }
+
+        var lines = yaml.Replace("\r\n", "\n").Split('\n');
+        var result = new List<string>(lines.Length);
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var nameRegex = new Regex(@"^(?<indent>\s*(?:-\s+)?name\s*:\s*)(?<quote>[""']?)(?<val>[^""'\r\n]+)\k<quote>", RegexOptions.Compiled);
+        var inlineNameRegex = new Regex(@"(?<prefix>(?:\{|,)\s*name\s*:\s*)(?<quote>[""']?)(?<val>[^""',}\r\n]+)\k<quote>", RegexOptions.Compiled);
+
+        string? curServer = null;
+        int? curPort = null;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.TrimStart();
+
+            if (trimmed.StartsWith("- "))
+            {
+                curServer = null;
+                curPort = null;
+            }
+
+            if (trimmed.StartsWith("server:") && !trimmed.StartsWith("servername:"))
+                curServer = trimmed["server:".Length..].Trim().Trim('"', '\'');
+            else if (trimmed.StartsWith("port:"))
+            {
+                if (int.TryParse(trimmed["port:".Length..].Trim().Trim('"', '\''), out var p))
+                    curPort = p;
+            }
+
+            var m = nameRegex.Match(line);
+            if (m.Success)
+            {
+                var indent = m.Groups["indent"].Value;
+                var rawVal = m.Groups["val"].Value;
+
+                string? city = null;
+                var decVal = DecodeUnicode(rawVal);
+                var pipe = decVal.IndexOf('|');
+                var coreVal = pipe > 0 ? decVal[..pipe].Trim() : decVal.Trim();
+
+                if (!cityByName.TryGetValue(rawVal, out city) &&
+                    !cityByName.TryGetValue(decVal, out city) &&
+                    !cityByName.TryGetValue(coreVal, out city))
+                {
+                    var lookServer = curServer;
+                    if (string.IsNullOrEmpty(lookServer))
+                    {
+                        for (int j = i + 1; j < Math.Min(lines.Length, i + 15); j++)
+                        {
+                            var nextTrimmed = lines[j].TrimStart();
+                            if (nextTrimmed.StartsWith("- ")) break;
+                            if (nextTrimmed.StartsWith("server:") && !nextTrimmed.StartsWith("servername:"))
+                            {
+                                lookServer = nextTrimmed["server:".Length..].Trim().Trim('"', '\'');
+                                break;
+                            }
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(lookServer))
+                    {
+                        cityByServer.TryGetValue(lookServer, out city);
+                        city ??= IpInfoService.GetCached(lookServer)?.City;
+                    }
+                }
+
+                var formatted = FormatNodeName(rawVal, city);
+                var uniqueName = formatted;
+                int seq = 2;
+                while (!usedNames.Add(uniqueName))
+                {
+                    uniqueName = $"{formatted}_{seq++}";
+                }
+
+                result.Add($"{indent}\"{uniqueName}\"");
+                continue;
+            }
+
+            var mInline = inlineNameRegex.Match(line);
+            if (mInline.Success && trimmed.StartsWith("- ") && trimmed.Contains('{'))
+            {
+                var prefix = mInline.Groups["prefix"].Value;
+                var rawVal = mInline.Groups["val"].Value;
+                var server = Extract(trimmed, "server:");
+                string? city = null;
+                if (!cityByName.TryGetValue(rawVal, out city) && !string.IsNullOrEmpty(server))
+                {
+                    cityByServer.TryGetValue(server, out city);
+                    city ??= IpInfoService.GetCached(server)?.City;
+                }
+                var formatted = FormatNodeName(rawVal, city);
+                var uniqueName = formatted;
+                int seq = 2;
+                while (!usedNames.Add(uniqueName))
+                {
+                    uniqueName = $"{formatted}_{seq++}";
+                }
+                var replaced = inlineNameRegex.Replace(line, $"{prefix}\"{uniqueName}\"");
+                result.Add(replaced);
+                continue;
+            }
+
+            result.Add(line);
+        }
+
+        return string.Join("\n", result);
     }
 
 

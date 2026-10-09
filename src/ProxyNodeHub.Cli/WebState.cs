@@ -94,6 +94,7 @@ public sealed class WebState
                     var yaml = File.ReadAllText(kernelAllYaml);
                     if (!string.IsNullOrWhiteSpace(yaml))
                     {
+                        yaml = SpeedTestRunner.FormatPassedYaml(yaml, _nodes);
                         _lastPassedYaml = yaml;
                         return yaml;
                     }
@@ -108,6 +109,7 @@ public sealed class WebState
                     var yaml = File.ReadAllText(PassedYamlPath);
                     if (!string.IsNullOrWhiteSpace(yaml))
                     {
+                        yaml = SpeedTestRunner.FormatPassedYaml(yaml, _nodes);
                         _lastPassedYaml = yaml;
                         return yaml;
                     }
@@ -176,13 +178,19 @@ public sealed class WebState
             {
                 var yaml = File.ReadAllText(kernelAllYaml);
                 if (!string.IsNullOrWhiteSpace(yaml))
+                {
+                    yaml = SpeedTestRunner.FormatPassedYaml(yaml, _nodes);
                     lock (_gate) _lastPassedYaml = yaml;
+                }
             }
             else if (File.Exists(PassedYamlPath))
             {
                 var yaml = File.ReadAllText(PassedYamlPath);
                 if (!string.IsNullOrWhiteSpace(yaml))
+                {
+                    yaml = SpeedTestRunner.FormatPassedYaml(yaml, _nodes);
                     lock (_gate) _lastPassedYaml = yaml;
+                }
             }
         }
         catch { }
@@ -237,6 +245,7 @@ public sealed class WebState
 
             if (!string.IsNullOrWhiteSpace(yaml))
             {
+                yaml = SpeedTestRunner.FormatPassedYaml(yaml, snap.Nodes);
                 lock (_gate) _lastPassedYaml = yaml;
                 AtomicFile.Write(PassedYamlPath, yaml);
             }
