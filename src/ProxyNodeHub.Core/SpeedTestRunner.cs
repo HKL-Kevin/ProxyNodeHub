@@ -286,15 +286,20 @@ public sealed class SpeedTestRunner : IDisposable
         // 测活模式 vs 完整测速模式参数配置
         if (aliveOnly)
         {
-            // 纯测活模式：彻底禁用真实测速与流媒体检测，仅运行 HTTP 204 探针与 IP 探测重命名
+            // 极速测活+轻量落地IP探测模式：
+            // 1. 禁用大流量下载测速（0 字节测速）
+            // 2. 启用 media-check 但平台仅保留 iprisk 单次轻量探针，实测获取真实出海落地公网 IP
+            // 3. 50 并发测活快速剔除死节点，存活节点 20 并发探测落地 IP
             yaml = SpeedTestConfig.SetScalar(yaml, "enable-speedtest", false);
-            yaml = SpeedTestConfig.SetScalar(yaml, "media-check", false);
+            yaml = SpeedTestConfig.SetScalar(yaml, "media-check", true);
+            yaml = SpeedTestConfig.SetBlock(yaml, "platforms", "platforms:\n  - \"iprisk\"");
             yaml = SpeedTestConfig.SetScalar(yaml, "rename-node", true);
             yaml = SpeedTestConfig.SetScalar(yaml, "min-speed", 0);
             yaml = SpeedTestConfig.SetScalar(yaml, "concurrent", 50);
-            yaml = SpeedTestConfig.SetScalar(yaml, "media-concurrent", 1);
+            yaml = SpeedTestConfig.SetScalar(yaml, "media-concurrent", 20);
             yaml = SpeedTestConfig.SetScalar(yaml, "speed-concurrent", 1);
             yaml = SpeedTestConfig.SetScalar(yaml, "timeout", 2000);
+            yaml = SpeedTestConfig.SetScalar(yaml, "media-check-timeout", 3);
         }
         else
         {

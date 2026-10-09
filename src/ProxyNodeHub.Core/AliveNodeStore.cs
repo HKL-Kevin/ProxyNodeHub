@@ -235,6 +235,43 @@ public static class AliveNodeStore
     }
 
     /// <summary>
+    /// 判断是否为已知的 CDN / 任播（Anycast）/ 域名前置边缘网络。
+    /// 此类网络的入口 IP 仅代表接入边缘节点，绝不代表后端真实的落地地区与城市。
+    /// </summary>
+    public static bool IsAnycastCdn(string? org, string? asn, string? server = null)
+    {
+        if (!string.IsNullOrWhiteSpace(asn))
+        {
+            var uAsn = asn.Trim().ToUpperInvariant();
+            if (uAsn is "AS13335" or "AS20940" or "AS54113" or "AS16509" or "AS8075")
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(org))
+        {
+            var lOrg = org.ToLowerInvariant();
+            if (lOrg.Contains("cloudflare") || lOrg.Contains("akamai") || lOrg.Contains("fastly") ||
+                lOrg.Contains("cloudfront") || lOrg.Contains("edgeone"))
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(server))
+        {
+            var lServer = server.Trim().ToLowerInvariant();
+            if (lServer.Contains("epicgames.com") || lServer.Contains("speedtest.net") ||
+                lServer.Contains("csgo.net") || lServer.Contains("cloudflare") ||
+                lServer.Contains("cloudfront") || lServer.Contains("edgeone") ||
+                lServer.StartsWith("162.159.") || lServer.StartsWith("104.16.") ||
+                lServer.StartsWith("104.17.") || lServer.StartsWith("104.18.") ||
+                lServer.StartsWith("104.19.") || lServer.StartsWith("104.20.") ||
+                lServer.StartsWith("104.21.") || lServer.StartsWith("172.67."))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// 原子写入/更新一轮测活结果（ACID 事务保障）。
     /// 对已有节点自动累加连续存活轮数，对新节点建立初次记录。
     /// </summary>
@@ -356,15 +393,28 @@ public static class AliveNodeStore
                     latency = stNode.Speed; // 内核在测活阶段通常用延迟填充
                 }
 
-                if (string.IsNullOrWhiteSpace(city))
+                // 优先使用实测出口 IP 的缓存信息（落地 IP 绝对真实）
+                if (!string.IsNullOrWhiteSpace(stNode?.Ip))
                 {
-                    var cachedIp = IpInfoService.GetCached(server);
-                    city ??= cachedIp?.City;
-                    country ??= cachedIp?.Country;
+                    var cachedExit = IpInfoService.GetCached(stNode.Ip);
+                    country ??= cachedExit?.Country;
+                    city ??= cachedExit?.City;
                 }
 
+                // 优先信任原节点名中明确标注的国家/城市（避免 Anycast CDN 入口机房覆盖原作者标注）
                 country ??= TryExtractCountry(name);
                 city ??= TryExtractCity(name);
+
+                // 最后兜底：只有当国家未知且 server 并非已知 Anycast CDN 时，才允许使用 server 入口 IP
+                if (string.IsNullOrWhiteSpace(country))
+                {
+                    var cachedIp = IpInfoService.GetCached(server);
+                    if (cachedIp != null && !IsAnycastCdn(cachedIp.Org, cachedIp.Asn, server))
+                    {
+                        country = cachedIp.Country;
+                        city ??= cachedIp.City;
+                    }
+                }
 
                 var shortFp = id.Length >= 5 ? id[..5].ToLowerInvariant() : id.ToLowerInvariant();
                 var finalName = BuildStandardNodeName(name, country, city, shortFp);
@@ -673,33 +723,7 @@ public static class AliveNodeStore
             var flag = CountryCodeToFlag(code);
             var prefix = $"{flag}{code}";
 
-            if (core.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
-                core.StartsWith($"{flag} {code}", StringComparison.OrdinalIgnoreCase))
-            {
-                // 规范化头部为 🇺🇸US 紧凑格式
-                if (core.StartsWith($"{flag} {code}", StringComparison.OrdinalIgnoreCase))
-                {
-                    core = $"{prefix}{core[($"{flag} {code}").Length..]}";
-                }
-
-                if (cleanCity != null)
-                {
-                    if (core.Contains($"_{cleanCity}", StringComparison.OrdinalIgnoreCase) ||
-                        core.Contains($"-{cleanCity}", StringComparison.OrdinalIgnoreCase))
-                    {
-                        core = core.Replace($"-{cleanCity}", $"_{cleanCity}");
-                    }
-                    else
-                    {
-                        core = $"{core}_{cleanCity}";
-                    }
-                }
-            }
-            else
-            {
-                // 原名不符合标准国名前缀，使用反查出的国家与城市重新组装
-                core = cleanCity != null ? $"{prefix}_{cleanCity}" : prefix;
-            }
+            core = cleanCity != null ? $"{prefix}_{cleanCity}" : prefix;
         }
         else
         {
@@ -772,11 +796,26 @@ public static class AliveNodeStore
             var country = r.country ?? TryExtractCountry(r.name);
             var city = r.city ?? TryExtractCity(r.name);
 
-            if (string.IsNullOrWhiteSpace(city))
+            var isAnycast = IsAnycastCdn(null, null, r.server);
+            var cachedIp = IpInfoService.GetCached(r.server);
+            if (!isAnycast && cachedIp != null && IsAnycastCdn(cachedIp.Org, cachedIp.Asn, r.server))
             {
-                var cachedIp = IpInfoService.GetCached(r.server);
-                city ??= cachedIp?.City;
-                country ??= cachedIp?.Country;
+                isAnycast = true;
+            }
+
+            if (isAnycast)
+            {
+                // 该节点使用了 CDN/Anycast 边缘接入，清洗边缘机房城市为 null 避免失真
+                if (city is "Dreieich" or "Des Moines" or "San Jose" or "Seattle" ||
+                    (!string.IsNullOrWhiteSpace(city) && TryExtractCity(r.name) == null))
+                {
+                    city = null;
+                }
+            }
+            else if (string.IsNullOrWhiteSpace(city) && cachedIp != null)
+            {
+                city = cachedIp.City;
+                country ??= cachedIp.Country;
             }
 
             var newId = ComputeFingerprint(r.protocol, r.server, r.port, r.rawYaml);
@@ -871,8 +910,14 @@ public static class AliveNodeStore
                 if (!hostToIp.TryGetValue(t.server, out var ip) || !ipInfoMap.TryGetValue(ip, out var info))
                     continue;
 
-                var country = !string.IsNullOrWhiteSpace(info.Country) ? info.Country : TryExtractCountry(t.name);
-                var city = !string.IsNullOrWhiteSpace(info.City) ? info.City : TryExtractCity(t.name);
+                var country = TryExtractCountry(t.name);
+                var city = TryExtractCity(t.name);
+
+                if (string.IsNullOrWhiteSpace(country) && !IsAnycastCdn(info.Org, info.Asn, t.server))
+                {
+                    country = info.Country;
+                    city ??= info.City;
+                }
 
                 var shortFp = t.id.Length >= 5 ? t.id[..5].ToLowerInvariant() : t.id.ToLowerInvariant();
                 var finalName = BuildStandardNodeName(t.name, country, city, shortFp);
