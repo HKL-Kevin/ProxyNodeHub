@@ -949,11 +949,34 @@ public sealed class WebState
                 SaveRepos();
 
                 var speedTestSources = new List<SubSource>();
+
+                // 1. 本次搜索出的有效仓库订阅
                 foreach (var r in liveRepos)
                 {
                     foreach (var l in r.Links.Where(l => l.IsValid && l.NodeCount > 0))
                     {
                         speedTestSources.Add(new SubSource { Url = l.Url, Repo = r.FullName });
+                    }
+                }
+
+                // 2. 预存常用订阅 (Settings.SubUrls)
+                if (settings.SubUrls is { Count: > 0 })
+                {
+                    foreach (var sub in settings.SubUrls)
+                    {
+                        if (!string.IsNullOrWhiteSpace(sub.Url))
+                        {
+                            speedTestSources.Add(new SubSource { Url = sub.Url.Trim(), Repo = $"常用订阅:{sub.Name}" });
+                        }
+                    }
+                }
+
+                // 3. 收藏夹中的仓库订阅 (Favorites)
+                foreach (var r in FavoritesStore.Load())
+                {
+                    foreach (var l in r.Links.Where(l => l.IsValid && l.NodeCount > 0))
+                    {
+                        speedTestSources.Add(new SubSource { Url = l.Url, Repo = $"收藏:{r.FullName}" });
                     }
                 }
 
