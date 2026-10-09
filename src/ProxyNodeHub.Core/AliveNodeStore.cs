@@ -184,8 +184,8 @@ public static class AliveNodeStore
     }
 
     /// <summary>
-    /// 基于节点核心连接标识（协议 + 服务器 + 端口 + 私有凭据/uuid/密码）计算稳定指纹 ID。
-    /// 确保跨测速轮次中同一个物理节点获得相同的指纹。
+    /// 基于节点全维度物理连接拓扑（协议 + 服务器 + 端口 + SNI/servername + Host + Path + Reality公钥 + 凭据/uuid/密码）计算确定性指纹 ID。
+    /// 确保 CDN 优选 IP、反代分流等同 IP/同端口场景下不同 SNI/Host 的物理节点获得独立的指纹，杜绝冲突覆盖。
     /// </summary>
     public static string ComputeFingerprint(string protocol, string server, int port, string rawYaml)
     {
@@ -198,7 +198,38 @@ public static class AliveNodeStore
             if (passMatch.Success) authVal = passMatch.Groups[1].Value.Trim();
         }
 
-        var identity = $"{protocol.ToLowerInvariant()}://{server.ToLowerInvariant()}:{port}#{authVal}";
+        var sniMatch = Regex.Match(rawYaml, @"(?:servername|sni)\s*:\s*[""']?([^""'\r\n\s]+)[""']?", RegexOptions.IgnoreCase);
+        var sni = sniMatch.Success ? sniMatch.Groups[1].Value.Trim().ToLowerInvariant() : "";
+
+        var hostMatch = Regex.Match(rawYaml, @"(?:^|\s|,)(?:Host|host)\s*:\s*[""']?([^""'\r\n\s]+)[""']?", RegexOptions.Multiline);
+        var host = hostMatch.Success ? hostMatch.Groups[1].Value.Trim().ToLowerInvariant() : "";
+
+        var pathMatch = Regex.Match(rawYaml, @"(?:path|grpc-service-name)\s*:\s*[""']?([^""'\r\n\s]+)[""']?", RegexOptions.IgnoreCase);
+        var path = pathMatch.Success ? pathMatch.Groups[1].Value.Trim() : "";
+
+        var pkMatch = Regex.Match(rawYaml, @"public-key\s*:\s*[""']?([^""'\r\n\s]+)[""']?", RegexOptions.IgnoreCase);
+        var pubKey = pkMatch.Success ? pkMatch.Groups[1].Value.Trim() : "";
+
+        var sb = new StringBuilder();
+        sb.Append(protocol.ToLowerInvariant()).Append("://").Append(server.ToLowerInvariant()).Append(':').Append(port);
+
+        var queryParts = new List<string>();
+        if (!string.IsNullOrEmpty(sni)) queryParts.Add($"sni={sni}");
+        if (!string.IsNullOrEmpty(host) && !string.Equals(host, sni, StringComparison.OrdinalIgnoreCase)) queryParts.Add($"host={host}");
+        if (!string.IsNullOrEmpty(path)) queryParts.Add($"path={path}");
+        if (!string.IsNullOrEmpty(pubKey)) queryParts.Add($"pbk={pubKey}");
+
+        if (queryParts.Count > 0)
+        {
+            sb.Append('?').Append(string.Join("&", queryParts));
+        }
+
+        if (!string.IsNullOrEmpty(authVal))
+        {
+            sb.Append('#').Append(authVal);
+        }
+
+        var identity = sb.ToString();
         var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
         return Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
     }
@@ -728,12 +759,13 @@ public static class AliveNodeStore
 
         int changed = 0;
         using var upCmd = conn.CreateCommand();
-        upCmd.CommandText = "UPDATE alive_nodes SET name = @name, country = @country, city = @city, raw_yaml = @raw_yaml WHERE id = @id";
+        upCmd.CommandText = "UPDATE alive_nodes SET id = @newId, name = @name, country = @country, city = @city, raw_yaml = @raw_yaml WHERE id = @oldId";
+        var pNewId = upCmd.Parameters.Add("@newId", SqliteType.Text);
         var pName = upCmd.Parameters.Add("@name", SqliteType.Text);
         var pCountry = upCmd.Parameters.Add("@country", SqliteType.Text);
         var pCity = upCmd.Parameters.Add("@city", SqliteType.Text);
         var pYaml = upCmd.Parameters.Add("@raw_yaml", SqliteType.Text);
-        var pId = upCmd.Parameters.Add("@id", SqliteType.Text);
+        var pOldId = upCmd.Parameters.Add("@oldId", SqliteType.Text);
 
         foreach (var r in rows)
         {
@@ -747,13 +779,15 @@ public static class AliveNodeStore
                 country ??= cachedIp?.Country;
             }
 
-            var shortFp = r.id.Length >= 5 ? r.id[..5].ToLowerInvariant() : r.id.ToLowerInvariant();
+            var newId = ComputeFingerprint(r.protocol, r.server, r.port, r.rawYaml);
+            var shortFp = newId.Length >= 5 ? newId[..5].ToLowerInvariant() : newId.ToLowerInvariant();
             var finalName = BuildStandardNodeName(r.name, country, city, shortFp);
             var finalYaml = ReplaceYamlName(r.rawYaml, finalName);
 
-            if (finalName != r.name || finalYaml != r.rawYaml || country != r.country || city != r.city)
+            if (newId != r.id || finalName != r.name || finalYaml != r.rawYaml || country != r.country || city != r.city)
             {
-                pId.Value = r.id;
+                pOldId.Value = r.id;
+                pNewId.Value = newId;
                 pName.Value = finalName;
                 pCountry.Value = (object?)country ?? DBNull.Value;
                 pCity.Value = (object?)city ?? DBNull.Value;
