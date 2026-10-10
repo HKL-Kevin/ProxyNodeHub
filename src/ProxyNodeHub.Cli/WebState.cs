@@ -59,6 +59,7 @@ public sealed class WebState
     // ── 测速状态 ──
     private CancellationTokenSource? _speedCts;
     public bool SpeedTesting { get; private set; }
+    public string SpeedTarget { get; private set; } = "";
     public SpeedTestStatus? SpeedStatus { get; private set; }
     private List<SpeedTestNode> _nodes = new();
     public IReadOnlyList<SpeedTestNode> Nodes { get { lock (_gate) return _nodes.ToList(); } }
@@ -603,6 +604,7 @@ public sealed class WebState
         {
             if (SpeedTesting) return false;
             SpeedTesting = true;
+            SpeedTarget = "selected";
             SpeedStatus = null;
             _speedCts = new CancellationTokenSource();
         }
@@ -658,6 +660,7 @@ public sealed class WebState
                 lock (_gate)
                 {
                     SpeedTesting = false;
+                    SpeedTarget = "";
                     SpeedStatus = null;
                 }
             }
@@ -800,6 +803,7 @@ public sealed class WebState
         {
             if (SpeedTesting) return false;
             SpeedTesting = true;
+            SpeedTarget = "all";
             SpeedStatus = null;
             _speedCts = new CancellationTokenSource();
         }
@@ -856,6 +860,7 @@ public sealed class WebState
                 lock (_gate)
                 {
                     SpeedTesting = false;
+                    SpeedTarget = "";
                     SpeedStatus = null;
                 }
             }
@@ -1177,6 +1182,7 @@ public sealed class WebState
         {
             if (SpeedTesting || PipelineRunning) return false;
             SpeedTesting = true;
+            SpeedTarget = "alive";
             SpeedStatus = null;
             _speedCts = new CancellationTokenSource();
         }
@@ -1234,6 +1240,7 @@ public sealed class WebState
                 lock (_gate)
                 {
                     SpeedTesting = false;
+                    SpeedTarget = "";
                     SpeedStatus = null;
                 }
             }

@@ -89,6 +89,7 @@ public static class WebServer
             pipelineMessage = state.PipelineMessage,
             aliveCount = AliveNodeStore.GetStats().TotalCount,
             speedTesting = state.SpeedTesting,
+            speedTarget = state.SpeedTarget,
             speedStatus = state.SpeedStatus,
             speedFinishedAt = state.SpeedFinishedAt,
             loadingCatalog = state.LoadingCatalog,

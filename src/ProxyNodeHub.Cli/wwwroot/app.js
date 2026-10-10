@@ -347,7 +347,14 @@ async function pollState() {
     }
 
     // 测速状态
-    if (s.speedTesting !== state.speedTesting) setSpeedTesting(s.speedTesting);
+    if (s.speedTesting !== state.speedTesting) {
+      setSpeedTesting(s.speedTesting, s.speedTarget);
+      if (!s.speedTesting && state.view === 'alive') {
+        loadAliveNodes();
+      }
+    }
+    state.speedTarget = s.speedTarget || '';
+
     if (s.speedTesting && s.speedStatus) {
       const p = s.speedStatus.pipeline;
       const total = p?.total || s.speedStatus.proxyCount || 1;
@@ -356,18 +363,24 @@ async function pollState() {
       $('spProgressBar').style.width = Math.min(100, done / total * 100) + '%';
       $('spProgressText').textContent =
         `${total} 节点 · 存活 ${p?.alivePass ?? 0} · 测速通过 ${p?.speedPass ?? 0}`;
-      // 测速进行中：实时刷新结果表 + 地图（后端 PollUntilDoneAsync 定期
-      // 把 /api/results 的已完成节点灌进 state._nodes）
+      // 测速进行中：实时刷新结果表 + 地图 + 存活池中已完成节点的测速数据
       if (s.passedCount !== state._lastPassedCount) {
         state._lastPassedCount = s.passedCount;
-        loadNodes().then(() => renderWorldMap());
+        loadNodes().then(() => {
+          renderWorldMap();
+          if (state.view === 'alive') renderAliveNodes();
+          else if (state.view === 'speedtest' && state.catalogLoaded) renderCatalog();
+        });
       }
     } else if (!s.speedTesting) {
       $('spProgressWrap').classList.remove('active');
-      // 测速刚结束 → 自动刷新结果表 + 世界地图，否则用户得手动切回页面才看得到
+      // 测速刚结束 → 自动刷新结果表 + 世界地图，并刷新存活池
       if (s.speedFinishedAt && s.speedFinishedAt !== state._lastSpeedFinish) {
         state._lastSpeedFinish = s.speedFinishedAt;
-        loadNodes().then(() => renderWorldMap());
+        loadNodes().then(() => {
+          renderWorldMap();
+          if (state.view === 'alive') loadAliveNodes();
+        });
       }
     }
 
@@ -377,14 +390,32 @@ async function pollState() {
     const aliveTotalChip = $('aliveTotalChip');
     if (aliveTotalChip) aliveTotalChip.textContent = `${s.aliveCount ?? 0} 个存活`;
 
-    if (s.pipelineRunning !== state.pipelineRunning) {
+    if (s.pipelineRunning !== state.pipelineRunning || s.pipelinePhase !== state.pipelinePhase) {
       state.pipelineRunning = s.pipelineRunning;
+      state.pipelinePhase = s.pipelinePhase || '';
       const btnStart = $('btnStartPipeline');
       const btnCancel = $('btnCancelPipeline');
+      const btnProbe = $('btnProbeAlive');
       if (btnStart) btnStart.disabled = s.pipelineRunning;
       if (btnCancel) btnCancel.style.display = s.pipelineRunning ? '' : 'none';
+      if (btnProbe) {
+        const isProbing = s.pipelineRunning && s.pipelinePhase === 'probing_alive';
+        btnProbe.classList.toggle('running', isProbing);
+        btnProbe.disabled = isProbing;
+        const ico = btnProbe.querySelector('.ico');
+        const txt = btnProbe.querySelector('span:last-child');
+        if (isProbing) {
+          if (ico) ico.innerHTML = '<span class="spinner-node" style="border-top-color:#fff"></span>';
+          if (txt) txt.textContent = '探测中...';
+        } else {
+          if (ico) ico.textContent = '🎯';
+          if (txt) txt.textContent = '探测真实落地';
+        }
+      }
       if (!s.pipelineRunning && state.view === 'alive') {
         loadAliveNodes();
+      } else if (s.pipelineRunning && state.view === 'alive') {
+        renderAliveNodes();
       }
     }
 
@@ -877,6 +908,7 @@ function renderCatalog() {
   // 先清空，否则筛选后行数变少会残留旧行
   body.innerHTML = '';
 
+  const isSpeedTesting = state.speedTesting;
   const renderBatch = () => {
     const frag = document.createDocumentFragment();
     const end = Math.min(rendered + BATCH, total);
@@ -885,10 +917,28 @@ function renderCatalog() {
       const tr = document.createElement('tr');
       tr.dataset.uri = n.uri || '';
       tr.dataset.idx = String(i);
+
+      const isSelected = state.selectedUris.has(n.uri);
+      let namePrefix = '';
+      let statusBadge = '';
+      if (isSpeedTesting && isSelected) {
+        const matched = (state.nodes || []).find(t =>
+          (t.server || '').toLowerCase() === (n.server || '').toLowerCase() &&
+          String(t.port || '') === String(n.port || '')
+        );
+        if (matched && matched.speed > 0) {
+          statusBadge = ` <span class="pill live" title="已完成测速: ${fmtSpeed(matched.speed)}">✓ ${fmtSpeed(matched.speed)}</span>`;
+        } else {
+          tr.classList.add('row-testing');
+          namePrefix = '<span class="spinner-node" title="正在测速中"></span>';
+          statusBadge = ' <span class="node-testing-pill"><span class="spinner-node"></span>测速中</span>';
+        }
+      }
+
       // innerHTML 单行比逐个 createElement 快；分批保证不卡
       tr.innerHTML =
-        `<td class="col-chk"><input type="checkbox" data-idx="${i}"${state.selectedUris.has(n.uri) ? ' checked' : ''}></td>` +
-        `<td class="col-name" title="${escapeHtml(n.name || '')}">${escapeHtml(n.name || '—')}</td>` +
+        `<td class="col-chk"><input type="checkbox" data-idx="${i}"${isSelected ? ' checked' : ''}></td>` +
+        `<td class="col-name" title="${escapeHtml(n.name || '')}">${namePrefix}${escapeHtml(n.name || '—')}${statusBadge}</td>` +
         `<td class="col-proto"><span class="proto-tag ${(n.protocol || '').toLowerCase()}">${escapeHtml(n.protocol || '—')}</span></td>` +
         `<td class="col-server" title="${escapeHtml(n.server)}"><span style="font-family:var(--mono);font-size:11px">${escapeHtml(n.server)}</span></td>` +
         `<td class="num col-port">${escapeHtml(n.port)}</td>` +
@@ -994,12 +1044,46 @@ $('btnTestSelected').addEventListener('click', async () => {
   }
 });
 
-function setSpeedTesting(on) {
+function setSpeedTesting(on, target) {
   state.speedTesting = on;
+  state.speedTarget = target || state.speedTarget || '';
+
+  // 1. 测速选中节点按钮
   const btn = $('btnTestSelected');
-  btn.classList.toggle('running', on);
-  btn.querySelector('.ico').textContent = on ? '■' : '▶';
-  updateTestButton();
+  if (btn) {
+    btn.classList.toggle('running', on);
+    const ico = btn.querySelector('.ico');
+    if (ico) {
+      ico.innerHTML = on ? '<span class="spinner-node" style="border-top-color:#fff;margin-right:0"></span>' : '▶';
+    }
+    updateTestButton();
+  }
+
+  // 2. 存活池测速按钮
+  const isAliveTarget = state.speedTarget === 'alive' || !state.speedTarget;
+  ['btnSpeedTestAlive', 'btnSpeedTestAliveDirect'].forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.classList.toggle('running', on && isAliveTarget);
+    b.disabled = on && isAliveTarget;
+    const ico = b.querySelector('.ico');
+    const txt = b.querySelector('span:last-child');
+    if (on && isAliveTarget) {
+      if (ico) ico.innerHTML = '<span class="spinner-node" style="border-top-color:#fff;margin-right:0"></span>';
+      if (txt) txt.textContent = '测速中...';
+    } else {
+      if (ico) ico.textContent = id.includes('Direct') ? '🟢' : '⚡';
+      if (txt) txt.textContent = '测速存活池节点';
+    }
+  });
+
+  // 3. 视图联动刷新
+  if (state.view === 'alive') {
+    renderAliveNodes();
+  } else if (state.view === 'speedtest') {
+    renderNodes();
+    if (state.catalogLoaded) renderCatalog();
+  }
 }
 
 async function loadNodes() {
@@ -1013,6 +1097,18 @@ function renderNodes() {
   const body = $('spBody');
   const hasNodes = state.nodes.length > 0;
   $('spEmpty').classList.toggle('show', !hasNodes);
+  if (!hasNodes) {
+    if (state.speedTesting) {
+      $('spEmpty').innerHTML = `
+        <p class="empty-title"><span class="spinner-node" style="width:16px;height:16px;border-width:2.5px"></span> 正在并发测速中…</p>
+        <p>内核正在对节点进行真实下载测速与分析，测速通过的节点将实时呈现在此列表中…</p>`;
+    } else {
+      $('spEmpty').innerHTML = `
+        <p class="empty-title">暂无测速记录</p>
+        <p>首先点击「加载节点清单」拉取并解析节点，勾选所需节点后点击「测速选中节点」。<br>
+           测速会对选中节点进行真实流量下载与延迟测试，按需测速更加高效省流。</p>`;
+    }
+  }
   $('spBar').style.display = hasNodes ? '' : 'none';
   const passedCount = state.nodes.filter(n => n.passed).length;
   $('spPassedCount').textContent = `${passedCount} 个通过`;
@@ -1457,20 +1553,43 @@ function renderAliveNodes() {
     sel.value = curVal;
   }
 
-  body.innerHTML = nodes.map(n => `
-    <tr>
-      <td class="col-name" title="${escapeHtml(n.name)}">${escapeHtml(n.name || '—')}</td>
+  const isTestingAlive = (state.speedTesting && (state.speedTarget === 'alive' || !state.speedTarget)) ||
+                         (state.pipelineRunning && state.pipelinePhase === 'probing_alive');
+
+  body.innerHTML = nodes.map(n => {
+    let speedHtml = n.latencyMs > 0 ? `${n.latencyMs} ms` : '—';
+    let namePrefix = '';
+    let isRowTesting = false;
+
+    if (isTestingAlive) {
+      // 检查当前节点是否已在 state.nodes 中完成测速并取得速度数据
+      const matched = (state.nodes || []).find(t =>
+        (t.server || '').toLowerCase() === (n.server || '').toLowerCase() &&
+        String(t.port || '') === String(n.port || '')
+      );
+      if (matched && matched.speed > 0) {
+        speedHtml = `<span class="pill live" style="font-weight:700" title="测速完成: ${fmtSpeed(matched.speed)}">✓ ${fmtSpeed(matched.speed)}</span>`;
+      } else {
+        isRowTesting = true;
+        namePrefix = '<span class="spinner-node" title="正在测速中"></span>';
+        speedHtml = '<span class="node-testing-pill"><span class="spinner-node"></span>测速中</span>';
+      }
+    }
+
+    return `
+    <tr class="${isRowTesting ? 'row-testing' : ''}">
+      <td class="col-name" title="${escapeHtml(n.name)}">${namePrefix}${escapeHtml(n.name || '—')}</td>
       <td class="col-proto"><span class="proto-tag ${(n.protocol || '').toLowerCase()}">${escapeHtml(n.protocol || '—')}</span></td>
       <td class="col-server" title="${escapeHtml(n.server)}:${escapeHtml(n.port)}"><span style="font-family:var(--mono);font-size:11px">${escapeHtml(n.server)}:${escapeHtml(n.port)}</span></td>
       <td class="col-country">${escapeHtml(n.country || '—')}</td>
       <td class="col-city">${escapeHtml(n.city || '—')}</td>
-      <td class="num col-speed">${n.latencyMs > 0 ? n.latencyMs + ' ms' : '—'}</td>
+      <td class="num col-speed">${speedHtml}</td>
       <td class="col-media">
         <span class="pill ${n.consecutiveAlive >= 2 ? 'live' : 'stale'}">${n.consecutiveAlive} 轮</span>
       </td>
       <td class="col-src">${relTime(n.lastAliveAt)}</td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
 async function startPipeline() {
@@ -1499,6 +1618,7 @@ async function cancelPipeline() {
 
 async function speedTestAlivePool() {
   try {
+    setSpeedTesting(true, 'alive');
     await api('/speedtest/alive', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1507,16 +1627,23 @@ async function speedTestAlivePool() {
     toast('已从存活池启动测速', 'success');
     openLog();
   } catch (e) {
+    setSpeedTesting(false, '');
     toast('启动测速失败: ' + e.message, 'error');
   }
 }
 
 async function probeAlivePool() {
   try {
+    state.pipelineRunning = true;
+    state.pipelinePhase = 'probing_alive';
+    renderAliveNodes();
     await api('/alive/probe', { method: 'POST' });
     toast('已启动存活池真实落地探测', 'success');
     openLog();
   } catch (e) {
+    state.pipelineRunning = false;
+    state.pipelinePhase = '';
+    renderAliveNodes();
     toast('启动探测失败: ' + e.message, 'error');
   }
 }
