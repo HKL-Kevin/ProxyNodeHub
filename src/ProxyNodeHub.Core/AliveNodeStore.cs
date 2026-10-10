@@ -796,26 +796,20 @@ public static class AliveNodeStore
             var country = r.country ?? TryExtractCountry(r.name);
             var city = r.city ?? TryExtractCity(r.name);
 
-            var isAnycast = IsAnycastCdn(null, null, r.server);
-            var cachedIp = IpInfoService.GetCached(r.server);
-            if (!isAnycast && cachedIp != null && IsAnycastCdn(cachedIp.Org, cachedIp.Asn, r.server))
+            if (string.IsNullOrWhiteSpace(city) && !string.IsNullOrWhiteSpace(r.server))
             {
-                isAnycast = true;
-            }
-
-            if (isAnycast)
-            {
-                // 该节点使用了 CDN/Anycast 边缘接入，清洗边缘机房城市为 null 避免失真
-                if (city is "Dreieich" or "Des Moines" or "San Jose" or "Seattle" ||
-                    (!string.IsNullOrWhiteSpace(city) && TryExtractCity(r.name) == null))
+                var isAnycast = IsAnycastCdn(null, null, r.server);
+                var cachedIp = IpInfoService.GetCached(r.server);
+                if (!isAnycast && cachedIp != null && IsAnycastCdn(cachedIp.Org, cachedIp.Asn, r.server))
                 {
-                    city = null;
+                    isAnycast = true;
                 }
-            }
-            else if (string.IsNullOrWhiteSpace(city) && cachedIp != null)
-            {
-                city = cachedIp.City;
-                country ??= cachedIp.Country;
+
+                if (!isAnycast && cachedIp != null)
+                {
+                    city = cachedIp.City;
+                    country ??= cachedIp.Country;
+                }
             }
 
             var newId = ComputeFingerprint(r.protocol, r.server, r.port, r.rawYaml);

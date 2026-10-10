@@ -1505,9 +1505,6 @@ async function speedTestAlivePool() {
       body: JSON.stringify({ withHistory: false, keepRounds: 3 })
     });
     toast('已从存活池启动测速', 'success');
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === 'speedtest'));
-    document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-speedtest'));
-    state.view = 'speedtest';
     openLog();
   } catch (e) {
     toast('启动测速失败: ' + e.message, 'error');
